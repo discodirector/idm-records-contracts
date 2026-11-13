@@ -84,6 +84,12 @@ interface IValidatorV5 {
 }
 
 abstract contract LabelDeployFixture is Test {
+    /// @dev Skips a test that writes deployment records when the profile only reads deployments/ (the default
+    ///      profile; FOUNDRY_PROFILE=deploy may write).
+    function skipUnlessWritable() internal {
+        try vm.writeFile("deployments/test-write-check.preview.json", "{}") {} catch { vm.skip(true); }
+    }
+
     // Robinhood / Base constants, as the scripts have them.
     address constant USDG = 0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168;
     address constant RH_WETH = 0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73;
@@ -452,6 +458,7 @@ contract DeployRecordsTest is LabelDeployFixture {
     }
 
     function test_RecordAndBroadcastFile() public {
+        skipUnlessWritable();
         DeployRecords.Config memory c = recordsConfig();
         DeployRecords.Deployment memory d = script.deploy(c);
 
@@ -659,6 +666,7 @@ contract DeployLabelTest is LabelDeployFixture {
     }
 
     function test_RecordAndBroadcastFile() public {
+        skipUnlessWritable();
         DeployLabel.Config memory c = labelConfig();
         DeployLabel.Deployment memory d = script.deploy(c);
         string[] memory names = new string[](2);
@@ -866,6 +874,7 @@ contract DeployStationsSplitTest is LabelDeployFixture {
 /// env-driven step of both scripts runs here, in order.
 contract LabelDeployEnvTest is LabelDeployFixture {
     function test_RunAndVerifyFromEnv() public {
+        skipUnlessWritable();
         mockRobinhood();
         DeployRecords records = new DeployRecords();
         vm.setEnv("DEPLOYER", vm.toString(deployer));

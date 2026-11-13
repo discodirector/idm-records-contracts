@@ -9,11 +9,16 @@ optimizer_runs = 200
 via_ir = true
 bytecode_hash = "none"
 ffi = false
-fs_permissions = [{ access = "read-write", path = "./deployments" }, { access = "read", path = "./broadcast" }, { access = "read", path = "./out" }]
+fs_permissions = [{ access = "read", path = "./deployments" }, { access = "read", path = "./broadcast" }, { access = "read", path = "./out" }]
 remappings = ["v4-core/=lib/v4-core/", "@uniswap/v4-core/=lib/v4-core/", "v4-periphery/=lib/v4-periphery/", "forge-std/=lib/forge-std/src/", "solmate/=lib/solmate/"]
 
 [profile.default.fuzz]
 runs = 512
+
+# The deploy scripts write their records to deployments/: FOUNDRY_PROFILE=deploy forge script ...
+# The three record-file tests in test/LabelDeploy.t.sol run only under this profile and skip otherwise.
+[profile.deploy]
+fs_permissions = [{ access = "read-write", path = "./deployments" }, { access = "read", path = "./broadcast" }, { access = "read", path = "./out" }]
 
 [fmt]
 line_length = 120

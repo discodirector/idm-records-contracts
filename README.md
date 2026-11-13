@@ -83,7 +83,10 @@ forge test                                    # + Robinhood and Base fork tests,
 ARC_FORK_RPC=<Arc RPC> forge test --match-contract ArcForwarderForkTest
 ```
 
-Expected: 115 pass without forks; 132 pass with the Robinhood and Base forks (the 2 Arc fork tests need `ARC_FORK_RPC`).
+Expected: 112 pass without forks; 129 pass with the Robinhood and Base forks. The 2 Arc fork tests need
+`ARC_FORK_RPC`. The default profile only reads `deployments/`, so the 3 tests of the deploy record files skip;
+`FOUNDRY_PROFILE=deploy forge test` runs them too (132 pass with the forks). The deploy scripts write their records,
+so they run under that profile: `FOUNDRY_PROFILE=deploy forge script ...`.
 
 `shasum -a 256 -c DEPENDENCY_SHA256SUMS` checks every vendored file.
 
