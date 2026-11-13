@@ -109,6 +109,8 @@ contract DeployRecords is LabelDeployBase {
         /// @dev Lets contract and EIP-7702 wallets move their own records (v5 ruleset options 6). Limit Break v5 only.
         bool walletOtc;
         string baseURI;
+        /// @dev Token ids open to vouchers at deploy (drop 1's highest id); 0 = none until the owner calls setMintableUpTo.
+        uint256 mintableUpTo;
     }
 
     struct Deployment {
@@ -154,6 +156,7 @@ contract DeployRecords is LabelDeployBase {
             vm.envOr("RECORDS_VALIDATOR_CODEHASH", c.validator == DEFAULT_VALIDATOR ? V5_CODEHASH : bytes32(0));
         c.walletOtc = vm.envOr("RECORDS_ALLOW_WALLET_OTC", c.validator == DEFAULT_VALIDATOR);
         c.baseURI = vm.envOr("RECORDS_BASE_URI", DEFAULT_BASE_URI);
+        c.mintableUpTo = vm.envOr("RECORDS_MINTABLE_UP_TO", uint256(0));
     }
 
     /// @notice Everything that can be checked before a single transaction. Reverts with the input's name.
@@ -176,6 +179,7 @@ contract DeployRecords is LabelDeployBase {
         _isEoa(c.signer, "RECORDS_SIGNER");
         _isEoa(c.keeper, "PAYOUT_KEEPER");
         _checkBaseURI(c.baseURI);
+        require(c.mintableUpTo <= 1000, "RECORDS_MINTABLE_UP_TO: at most 1000 (the cap)");
         if (c.validator != address(0)) {
             _hasCode(c.validator, "RECORDS_VALIDATOR");
             _checkValidatorCode(c);
@@ -244,6 +248,7 @@ contract DeployRecords is LabelDeployBase {
         d.splitter = _deploySplit(royaltySplit(address(d.feeder), c.infra));
         d.records.setRoyalty(address(d.splitter), ROYALTY_BPS);
         if (c.validator != address(0)) d.records.setTransferValidator(c.validator);
+        if (c.mintableUpTo != 0) d.records.setMintableUpTo(c.mintableUpTo);
         // The deployer still owns the collection here, which is who v5 lets set its rules.
         if (c.walletOtc) _setWalletOtc(c.validator, address(d.records));
         if (c.owner != c.deployer) d.records.transferOwnership(c.owner);
@@ -321,7 +326,6 @@ contract DeployRecords is LabelDeployBase {
             n.transferValidator() == c.validator && n.getTransferValidator() == c.validator,
             "IDMRecords mismatch: transfer validator"
         );
-        require(!n.validatorLocked(), "IDMRecords mismatch: validator already locked");
         if (c.validator != address(0)) _checkValidatorCode(c);
         if (c.validator == DEFAULT_VALIDATOR) _checkPolicy(n, c.walletOtc);
         if (n.pendingSigner() != address(0)) {
@@ -424,6 +428,8 @@ contract DeployRecords is LabelDeployBase {
             console2.log("    contract / 7702 wallets move their own records (v5 options 6)", c.walletOtc);
         }
         console2.log("    tokens minted                 ", n.totalSupply());
+        console2.log("    open to vouchers: ids 1 ..    ", n.mintableUpTo());
+        if (n.mintableUpTo() == 0) console2.log("    !! no ids open: the owner calls setMintableUpTo(<drop's highest id>) before the drop");
         console2.log("  RewardFeeder (no withdrawal)    ", address(d.feeder));
         console2.log("    owner (replaces the keeper)   ", d.feeder.owner());
         console2.log("    keeper (feeds)                ", d.feeder.keeper());

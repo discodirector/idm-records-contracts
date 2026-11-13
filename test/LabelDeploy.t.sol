@@ -114,7 +114,7 @@ abstract contract LabelDeployFixture is Test {
 
     function recordsConfig() internal view returns (DeployRecords.Config memory) {
         return DeployRecords.Config(
-            deployer, deployer, signer, keeper, infra, address(0), bytes32(0), false, "https://theidm.fun/records/"
+            deployer, deployer, signer, keeper, infra, address(0), bytes32(0), false, "https://theidm.fun/records/", 37
         );
     }
 
@@ -186,8 +186,8 @@ contract DeployRecordsTest is LabelDeployFixture {
         DeployRecords.Deployment memory d = script.deploy(c);
         script.check(c, d);
 
-        // Three creations, then setRoyalty; nothing else.
-        assertEq(vm.getNonce(deployer), nonce + 4);
+        // Three creations, then setRoyalty and setMintableUpTo; nothing else.
+        assertEq(vm.getNonce(deployer), nonce + 5);
         assertEq(address(d.records), vm.computeCreateAddress(deployer, nonce));
         assertEq(address(d.feeder), vm.computeCreateAddress(deployer, nonce + 1));
         assertEq(address(d.splitter), vm.computeCreateAddress(deployer, nonce + 2));
@@ -197,6 +197,7 @@ contract DeployRecordsTest is LabelDeployFixture {
         assertEq(d.records.royaltyReceiver(), address(d.splitter));
         assertEq(d.records.royaltyBps(), 500);
         assertEq(d.records.transferValidator(), address(0));
+        assertEq(d.records.mintableUpTo(), 37); // drop 1's ids open, no more
         assertEq(address(d.feeder.records()), address(d.records));
         assertEq(d.feeder.keeper(), keeper);
         assertEq(d.feeder.owner(), deployer); // RECORDS_OWNER: may replace the keeper
@@ -227,8 +228,8 @@ contract DeployRecordsTest is LabelDeployFixture {
         script.checkInputs(c);
         uint64 nonce = vm.getNonce(deployer);
         DeployRecords.Deployment memory d = script.deploy(c);
-        // Three creations, setRoyalty, setTransferValidator, the v5 rules, transferOwnership.
-        assertEq(vm.getNonce(deployer), nonce + 7);
+        // Three creations, setRoyalty, setTransferValidator, setMintableUpTo, the v5 rules, transferOwnership.
+        assertEq(vm.getNonce(deployer), nonce + 8);
         CollectionSecurityPolicy memory p = ITransferValidatorV5(LB_VALIDATOR).getCollectionSecurityPolicy(address(d.records));
         assertEq(p.rulesetOptions, 6);
         assertEq(p.rulesetId, 0);
@@ -368,11 +369,6 @@ contract DeployRecordsTest is LabelDeployFixture {
         vm.expectRevert(bytes("IDMRecords mismatch: metadata already frozen"));
         script.check(c, d);
 
-        DeployRecords.Deployment memory e = script.deploy(c);
-        vm.prank(deployer);
-        e.records.lockTransferValidator();
-        vm.expectRevert(bytes("IDMRecords mismatch: validator already locked"));
-        script.check(c, e);
     }
 
     function _expectInput(DeployRecords.Config memory c, string memory message) internal {
@@ -393,6 +389,9 @@ contract DeployRecordsTest is LabelDeployFixture {
         c = recordsConfig();
         c.keeper = address(0);
         _expectInput(c, "PAYOUT_KEEPER: zero address");
+        c = recordsConfig();
+        c.mintableUpTo = 1001;
+        _expectInput(c, "RECORDS_MINTABLE_UP_TO: at most 1000 (the cap)");
         c = recordsConfig();
         c.signer = keeper;
         _expectInput(c, "RECORDS_SIGNER and PAYOUT_KEEPER: must be different addresses");

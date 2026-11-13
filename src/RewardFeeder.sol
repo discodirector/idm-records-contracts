@@ -36,6 +36,10 @@ contract RewardFeeder is EthPoolSwap, KeeperOwned {
     uint64 public lastFeed;
     /// @notice Least USDG (6-decimal units) per 1 ETH a feed may get on average. Owner only, never zero.
     uint256 public minUsdgPerEth;
+    /// @notice Least reward token (6 decimals: 0.01 USDG) the ETH held must be worth at the floor to be swapped. Less
+    ///         waits for the next feed: v4 rounds a dust swap's output to nothing, which would fail the floor and let
+    ///         1 wei sent here block the pooling of the USDG held.
+    uint256 public constant MIN_SWAP_OUT = 1e4;
 
     event Fed(uint256 ethIn, uint256 swappedOut, uint256 pooled);
     event Swept(address indexed token, address indexed to, uint256 amount);
@@ -78,10 +82,12 @@ contract RewardFeeder is EthPoolSwap, KeeperOwned {
     receive() external payable {}
 
     /// @notice Swaps all ETH held (if any) to the reward token and pools everything held. Keeper only.
-    /// @param minOut Least reward token the swap may return; ignored when there is no ETH.
+    /// @param minOut Least reward token the swap may return; ignored when no ETH is swapped.
     function feed(uint256 minOut) external onlyKeeper returns (uint256 swappedOut, uint256 pooled) {
         lastFeed = uint64(block.timestamp);
         uint256 ethIn = address(this).balance;
+        // Dust ETH (worth under MIN_SWAP_OUT at the floor) waits; the USDG held is pooled anyway.
+        if (ethIn * minUsdgPerEth < MIN_SWAP_OUT * 1e18) ethIn = 0;
         if (ethIn > 0) {
             swappedOut = _swap(true, ethIn);
             if (swappedOut < minOut) revert TooLittle(swappedOut, minOut);

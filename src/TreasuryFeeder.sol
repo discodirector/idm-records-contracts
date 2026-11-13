@@ -26,6 +26,9 @@ contract TreasuryFeeder is EthPoolSwap, KeeperOwned {
 
     /// @notice Most USDG (6-decimal units) a swap may pay per 1 ETH on average. Owner only, never zero.
     uint256 public maxUsdgPerEth;
+    /// @notice Least USDG (6 decimals: 0.01 USDG) swapped. Less waits for the next swap: v4 rounds the fee on a dust
+    ///         input up to all of it, which would fail the ceiling and let 1 unit sent here hold back the ETH.
+    uint256 public constant MIN_SWAP_IN = 1e4;
 
     event Swapped(uint256 usdgIn, uint256 ethOut, uint256 sent);
     event Swept(address indexed token, address indexed to, uint256 amount);
@@ -69,9 +72,11 @@ contract TreasuryFeeder is EthPoolSwap, KeeperOwned {
     receive() external payable {}
 
     /// @notice Swaps all USDG held (if any) to ETH, then sends all ETH held to PulseTreasury. Keeper only.
-    /// @param minOut Least ETH (wei) the swap may return; ignored when there is no USDG.
+    /// @param minOut Least ETH (wei) the swap may return; ignored when no USDG is swapped.
     function swap(uint256 minOut) external onlyKeeper returns (uint256 usdgIn, uint256 ethOut, uint256 sent) {
         usdgIn = IERC20Minimal(usdg).balanceOf(address(this));
+        // Dust USDG waits; the ETH held still goes to the treasury.
+        if (usdgIn < MIN_SWAP_IN) usdgIn = 0;
         if (usdgIn > 0) {
             ethOut = _swap(false, usdgIn);
             if (ethOut < minOut) revert TooLittle(ethOut, minOut);

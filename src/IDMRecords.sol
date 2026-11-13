@@ -60,8 +60,8 @@ interface ITransferValidatorSetTokenType {
 ///           not minted yet keeps its credit; its first minter gets it. The label's per-track sale credits are paid on
 ///           Base (HolderRewards), not here.
 ///         - `claim(ids)` pays each token's rewards to its current holder. Only the holder, or an operator it approved
-///           for all its tokens, may call it: a contract holder (an escrow, a vault) is never paid tokens it cannot
-///           move. A transfer that fails (a frozen address) leaves that token's rewards on it and the rest of the batch
+///           for all its tokens, may call it, and a holder with code (an escrow, a vault, a Safe, an EIP-7702 wallet)
+///           only itself: a contract is never paid tokens it did not ask for and may be unable to move. A transfer that fails (a frozen address) leaves that token's rewards on it and the rest of the batch
 ///           goes on. Unclaimed rewards move with the NFT.
 ///
 ///         Holding at mint: a voucher carries `minHold`, and `mint` checks that `to` holds at least that much $IDM
@@ -70,19 +70,23 @@ interface ITransferValidatorSetTokenType {
 ///         Royalty: ERC-2981 (receiver and bps), enforced by an ERC721-C transfer validator once one is set
 ///         (`getTransferValidator`, ICreatorToken). Mints and claims never call the validator. What the validator
 ///         allows is set on the validator, not here: Limit Break's v5 keeps the collection's ruleset, options and
-///         lists under this contract's address, changed by its `owner()`. `lockTransferValidator` fixes only which
-///         validator is asked; the rules on it stay with the owner (and list 0 with Limit Break). With the
+///         lists under this contract's address, changed by its `owner()` (and list 0 by Limit Break). The owner can
+///         always change or remove the validator: there is no lock, so a validator that refuses every transfer can
+///         be undone. With the
 ///         deploy's options 6 (owner decision 2026-11-04: Safe and EIP-7702 wallets may move their own records),
 ///         any contract that holds a record (an escrow, a wrapper, a contract wallet) can move it itself, so a sale
 ///         through such a contract pays no royalty. Sales on listed marketplaces (Payment Processor, OpenSea through
 ///         its SignedZone) still pay it, and an unlisted marketplace acting as an approved operator is still refused.
 ///         docs/DEPLOY.md section 10.
 ///
-///         Trust: the signer key can mint every unminted track (to any wallet), and the owner can name a new signer,
+///         Supply in drops: the owner opens token ids up to `mintableUpTo` (`setMintableUpTo`) as each drop comes;
+///         a voucher for a higher id is refused. A leaked signer key can only mint what is open.
+///
+///         Trust: the signer key can mint every open, unminted track (to any wallet), and the owner can name a new signer,
 ///         so the owner can too, but only in the open: a new signer takes effect `SIGNER_DELAY` (48 h) after the owner
 ///         proposes it (`setSigner`, then `activateSigner` within `SIGNER_WINDOW`, 7 days, after that; later the
 ///         proposal lapses). If the signer key leaks, `revokeSigner` stops every voucher at once. The owner also sets
-///         the metadata base URI (until frozen), the royalty (≤ 10%) and the transfer validator (until locked).
+///         the metadata base URI (until frozen), the royalty (≤ 10%), the transfer validator and how far the supply is open.
 ///         Nobody can touch the reward pot.
 contract IDMRecords is ICreatorToken {
     // ---------------------------------------------------------------- constants
@@ -141,7 +145,8 @@ contract IDMRecords is ICreatorToken {
     address public royaltyReceiver;
     uint96 public royaltyBps;
     address public transferValidator;
-    bool public validatorLocked;
+    /// @notice Highest token id a voucher may mint now (0 = none); the owner opens each drop's ids.
+    uint256 public mintableUpTo;
 
     mapping(uint256 => bytes32) public metadataHash;
     mapping(uint256 => mapping(address => uint256)) public mintedInDrop;
@@ -178,7 +183,7 @@ contract IDMRecords is ICreatorToken {
     event BaseURISet(string baseURI);
     event MetadataFrozen();
     event RoyaltySet(address receiver, uint96 bps);
-    event TransferValidatorLocked();
+    event MintableUpToSet(uint256 mintableUpTo);
     event OwnershipTransferStarted(address indexed from, address indexed to);
     event OwnershipTransferred(address indexed from, address indexed to);
 
@@ -194,7 +199,7 @@ contract IDMRecords is ICreatorToken {
     error WrongFrom();
     error UnsafeRecipient();
     error Frozen();
-    error Locked();
+    error NotOpen(uint256 tokenId, uint256 mintableUpTo);
     error RoyaltyTooHigh();
     error LengthMismatch();
     error NoHolders();
@@ -253,6 +258,7 @@ contract IDMRecords is ICreatorToken {
         if (msg.sender != v.to) revert NotAuthorized();
         if (block.timestamp > v.deadline) revert Expired();
         if (v.tokenId == 0 || v.tokenId > MAX_SUPPLY) revert BadTokenId();
+        if (v.tokenId > mintableUpTo) revert NotOpen(v.tokenId, mintableUpTo);
         if (v.to == address(0)) revert ZeroAddress();
         if (_ownerOf[v.tokenId] != address(0)) revert AlreadyMinted();
         if (_recover(voucherDigest(v), signature) != signer) revert BadSignature();
@@ -347,7 +353,10 @@ contract IDMRecords is ICreatorToken {
             uint256 id = tokenIds[i];
             address holder = _ownerOf[id];
             if (holder == address(0)) revert NotMinted();
-            if (msg.sender != holder && !isApprovedForAll[holder][msg.sender]) revert NotAuthorized();
+            // An operator claims only for a holder without code; a contract asks for its own rewards.
+            if (msg.sender != holder && (holder.code.length != 0 || !isApprovedForAll[holder][msg.sender])) {
+                revert NotAuthorized();
+            }
             uint256 amount = claimable(id);
             if (amount == 0) continue;
             uint256 credit = trackCredit[id];
@@ -532,7 +541,6 @@ contract IDMRecords is ICreatorToken {
 
     /// @notice Zero turns enforcement off. A validator must be a contract: a wallet address would block every transfer.
     function setTransferValidator(address validator) external onlyOwner {
-        if (validatorLocked) revert Locked();
         if (validator != address(0) && validator.code.length == 0) revert NotAContract();
         emit TransferValidatorUpdated(transferValidator, validator);
         transferValidator = validator;
@@ -543,12 +551,12 @@ contract IDMRecords is ICreatorToken {
         }
     }
 
-    /// @notice Fixes the validator address for good. It does not fix the validator's rules for this collection
-    ///         (ruleset, options, lists): those stay changeable by `owner()` on the validator, and Limit Break edits
-    ///         list 0. So a lock does not freeze royalty enforcement as it is.
-    function lockTransferValidator() external onlyOwner {
-        validatorLocked = true;
-        emit TransferValidatorLocked();
+    /// @notice Opens token ids up to `upTo` for vouchers (a new drop), or closes the ones not minted yet (a lower
+    ///         value). Minted tokens are never affected.
+    function setMintableUpTo(uint256 upTo) external onlyOwner {
+        if (upTo > MAX_SUPPLY) revert BadTokenId();
+        mintableUpTo = upTo;
+        emit MintableUpToSet(upTo);
     }
 
     function transferOwnership(address to) external onlyOwner {

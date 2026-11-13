@@ -10,15 +10,15 @@ Nothing here is deployed yet. This repository is published for review before the
 
 | File | Lines | Chain | What it does |
 | --- | ---: | --- | --- |
-| `src/IDMRecords.sol` | 579 | Robinhood Chain 4663 | ERC-721 collection, cap 1000. Mint by EIP-712 voucher from a signer service; only the voucher's `to` may submit it. USDG reward pot per token (`deposit`, `depositPool`, `claim`). ERC-2981 royalty, ERC721-C transfer validator (Limit Break v5), 48 h signer rotation, two-step ownership. |
-| `src/RewardFeeder.sol` | 111 | Robinhood | Keeper-only: swaps the ETH it receives to USDG in the ETH/USDG pool and pays it into the collection's shared pool. Owner-set price floor `minUsdgPerEth`. No withdrawal. |
-| `src/TreasuryFeeder.sol` | 97 | Robinhood | Keeper-only: swaps USDG to ETH in the same pool and sends it to the $IDM treasury. Owner-set price ceiling `maxUsdgPerEth`. |
+| `src/IDMRecords.sol` | 587 | Robinhood Chain 4663 | ERC-721 collection, cap 1000. Mint by EIP-712 voucher from a signer service; only the voucher's `to` may submit it, and only for ids the owner opened (`mintableUpTo`, drop by drop). USDG reward pot per token (`deposit`, `depositPool`, `claim`). ERC-2981 royalty, ERC721-C transfer validator (Limit Break v5), 48 h signer rotation, two-step ownership. |
+| `src/RewardFeeder.sol` | 117 | Robinhood | Keeper-only: swaps the ETH it receives to USDG in the ETH/USDG pool and pays it into the collection's shared pool. Owner-set price floor `minUsdgPerEth`. No withdrawal. |
+| `src/TreasuryFeeder.sol` | 102 | Robinhood | Keeper-only: swaps USDG to ETH in the same pool and sends it to the $IDM treasury. Owner-set price ceiling `maxUsdgPerEth`. |
 | `src/EthPoolSwap.sol` | 94 | Robinhood | Shared exact-input swap against the v4 PoolManager (`unlock` callback) used by both feeders. |
 | `src/KeeperOwned.sol` | 59 | Robinhood | Owner / keeper roles of the feeders. |
 | `src/RevenueSplitter.sol` | 144 | Robinhood, Base | Ownerless push splitter for ETH and ERC-20 with fixed payees and shares; optional WETH unwrap; ETH-only payee whose tokens go to a sink. |
 | `src/HolderRewards.sol` | 292 | Base 8453 | USDC rewards for record holders, paid against keeper-posted Merkle roots with a delay, guardian revoke, pushed or pulled claims. |
 | `src/ArcForwarder.sol` | 136 | Arc 5042 | Ownerless: sends all its USDC to a fixed recipient on Base with Circle CCTP v2. |
-| `script/*.s.sol` | 1449 | | Deploy scripts with dry run, on-chain checks (`verify()`), pinned code hashes and price band checks. In scope as far as they set security-relevant parameters. |
+| `script/*.s.sol` | 1455 | | Deploy scripts with dry run, on-chain checks (`verify()`), pinned code hashes and price band checks. In scope as far as they set security-relevant parameters. |
 
 Out of scope: `lib/` (vendored upstream code, see `DEPENDENCIES.md`), the $IDM token and its hook (already live),
 the off-chain services (voucher signer, payout keeper, rewards keeper). Comments that point to `docs/...` or `bot/...`
@@ -38,12 +38,13 @@ Station fee            -> Stations splitter -> 1/4 holders, 1/4 $IDM, 1/4 IMD bu
 
 ## Trust model
 
-- **Owner** (intended: a Safe). Sets the voucher signer (48 h delay, 7 day window, instant revoke), base URI until
-  frozen, royalty (max 10%), transfer validator until locked, feeder keeper and price band. Cannot mint, move tokens,
-  or take USDG from the pot.
-- **Voucher signer** (server key). Decides who may mint which token in which drop, the wallet limit and the $IDM
-  hold floor. A leaked signer key can mint the remaining supply to wallets it controls until the owner revokes it;
-  it cannot touch minted tokens or rewards.
+- **Owner** (intended: a Safe). Sets the voucher signer (48 h delay, 7 day window, instant revoke), which token ids
+  vouchers may mint (`setMintableUpTo`), base URI until frozen, royalty (max 10%), the transfer validator (no lock),
+  feeder keeper and price band. Cannot mint, move tokens, or take USDG from the pot. A validator that refuses
+  transfers would stop them until the owner changes it.
+- **Voucher signer** (server key). Decides who may mint which open token in which drop, the wallet limit and the
+  $IDM hold floor. A leaked signer key can mint the open, unminted ids of the current drop (and take credits gifted
+  to them) until the owner revokes it; it cannot touch minted tokens or their rewards.
 - **Keeper** (server key). Calls `feed` / `swap` only. Since the 2026-11-13 fixes the swap must land inside the
   owner's band, so a leaked keeper key can lose at most the band's gap on what the feeder holds.
 - **Splitters and ArcForwarder** have no owner and no admin: payees, shares and recipients are fixed at deploy.
@@ -57,6 +58,19 @@ Station fee            -> Stations splitter -> 1/4 holders, 1/4 $IDM, 1/4 IMD bu
    from the pool price and `verify()` rejects a band outside 0-50%. PoCs: `test_Poc_LeakedKeeperSandwichHitsTheFloor`,
    `test_Poc_LeakedKeeperSandwichHitsTheCeiling` in `test/RewardFeeder.fork.t.sol`.
 
+## Fixed after the IMD swarm audit (2026-11-13)
+
+The first swarm pass (job `71b19999-9a93-444e-9971-32ce0ebbadb8`, `audit-imported-code`, commit `6a404a6`) found no
+critical or high issue. Fixed in this commit:
+
+1. A blocking validator plus `lockTransferValidator()` could freeze every record for good: the lock is removed.
+2. A leaked signer key could mint all unminted ids in one transaction and keep most of every later pool deposit:
+   vouchers now mint only ids up to the owner-set `mintableUpTo` (`test_mintableUpTo_boundsWhatAVoucherCanMint`).
+3. 1 wei of ETH (or 1 unit of USDG) sent to a feeder failed the price band and held back the rest: dust under
+   0.01 USDG waits for the next swap (`test_Poc_DustDoesNotBlockTheFeeders`, fork).
+4. An operator approved for all could push a contract holder's USDG into it: a holder with code claims only itself
+   (`test_claim_operatorCannotPushRewardsIntoAContract`).
+
 ## Known and accepted
 
 - USDG is Paxos's upgradeable token: it can be paused and addresses frozen. A frozen holder's claim fails and stays
@@ -68,7 +82,7 @@ Station fee            -> Stations splitter -> 1/4 holders, 1/4 $IDM, 1/4 IMD bu
   service's 7- and 21-day minimum balance.
 - A splitter payee that rejects ETH blocks that splitter's ETH releases (push payouts, fixed payees).
 - The feeders' pool is fixed. If its liquidity leaves, funds wait in the feeder.
-- `lockTransferValidator()` and `freezeMetadata()` are one-way; no script calls them.
+- `freezeMetadata()` is one-way; no script calls it.
 
 ## Build and test
 
@@ -83,9 +97,9 @@ forge test                                    # + Robinhood and Base fork tests,
 ARC_FORK_RPC=<Arc RPC> forge test --match-contract ArcForwarderForkTest
 ```
 
-Expected: 112 pass without forks; 129 pass with the Robinhood and Base forks. The 2 Arc fork tests need
+Expected: 114 pass without forks; 132 pass with the Robinhood and Base forks. The 2 Arc fork tests need
 `ARC_FORK_RPC`. The default profile only reads `deployments/`, so the 3 tests of the deploy record files skip;
-`FOUNDRY_PROFILE=deploy forge test` runs them too (132 pass with the forks). The deploy scripts write their records,
+`FOUNDRY_PROFILE=deploy forge test` runs them too (135 pass with the forks). The deploy scripts write their records,
 so they run under that profile: `FOUNDRY_PROFILE=deploy forge script ...`.
 
 `shasum -a 256 -c DEPENDENCY_SHA256SUMS` checks every vendored file.

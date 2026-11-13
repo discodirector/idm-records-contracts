@@ -55,6 +55,7 @@ contract FeederForkTest is Test {
             "IDM Records", "RECORDS", address(this), vm.addr(signerKey), IERC20Like(USDG), IBalanceOf(IDM),
             "https://theidm.fun/records/", address(0), 0
         );
+        nft.setMintableUpTo(1000);
         // The band the deploy scripts set: 25% either side of the pool's price now.
         price = _poolPrice();
         feeder = new RewardFeeder(PM, IRecordsPot(address(nft)), owner, keeper, infra, 500, 10, price * 3 / 4);
@@ -308,6 +309,40 @@ contract FeederForkTest is Test {
         vm.prank(keeper);
         vm.expectPartialRevert(TreasuryFeeder.AboveCeiling.selector);
         treasuryFeeder.swap(0);
+    }
+
+    /// Swarm audit 2026-11-13 (finding 3): 1 wei sent to RewardFeeder used to swap for 0 USDG, fail the floor and
+    /// hold back the USDG it pools. Dust ETH now waits for the next feed; the USDG is pooled. Mirror: 1 unit of USDG
+    /// sent to TreasuryFeeder no longer holds back the ETH it forwards.
+    function test_Poc_DustDoesNotBlockTheFeeders() public live {
+        _mint(alice, 1);
+        deal(USDG, address(feeder), 1000e6);
+        vm.deal(address(feeder), 1);
+        vm.prank(keeper);
+        (uint256 out, uint256 pooled) = feeder.feed(0);
+        assertEq(out, 0);
+        assertEq(pooled, 1000e6);
+        assertEq(address(feeder).balance, 1); // waits for the next royalty
+
+        vm.deal(address(treasuryFeeder), 1 ether);
+        deal(USDG, address(treasuryFeeder), 1);
+        uint256 before = TREASURY.balance;
+        vm.prank(keeper);
+        (uint256 usdgIn,, uint256 sent) = treasuryFeeder.swap(0);
+        assertEq(usdgIn, 0);
+        assertEq(sent, 1 ether);
+        assertEq(TREASURY.balance - before, 1 ether);
+        assertEq(IERC20View(USDG).balanceOf(address(treasuryFeeder)), 1);
+
+        // Just above the threshold the swap runs and clears the band.
+        vm.deal(address(feeder), 1e4 * 1e18 / feeder.minUsdgPerEth() + 1);
+        vm.prank(keeper);
+        (out,) = feeder.feed(0);
+        assertGt(out, 0);
+        deal(USDG, address(treasuryFeeder), treasuryFeeder.MIN_SWAP_IN());
+        vm.prank(keeper);
+        (usdgIn,,) = treasuryFeeder.swap(0);
+        assertEq(usdgIn, treasuryFeeder.MIN_SWAP_IN());
     }
 
     /// Only the owner moves the band, never to zero; the keeper cannot.

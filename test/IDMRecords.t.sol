@@ -108,6 +108,12 @@ contract IDMRecordsTest is Test {
     address label = makeAddr("label");
     address royalty = makeAddr("royalty");
 
+    /// Opens every token id to vouchers, as the owner does drop by drop.
+    function _openAll() internal {
+        vm.prank(owner);
+        nft.setMintableUpTo(1000);
+    }
+
     function setUp() public {
         signer = vm.addr(signerKey);
         usd = new MockUSD();
@@ -115,6 +121,7 @@ contract IDMRecordsTest is Test {
         nft = new IDMRecords(
             "IDM Records", "RECORDS", owner, signer, IERC20Like(address(usd)), IBalanceOf(address(idm)), "https://theidm.fun/nft/", royalty, 500
         );
+        _openAll();
         usd.mint(label, 1_000_000e6);
         vm.prank(label);
         usd.approve(address(nft), type(uint256).max);
@@ -519,6 +526,7 @@ contract IDMRecordsTest is Test {
     function test_Poc_claim_frozenHolderDoesNotBrickTheBatch() public {
         FreezableUSD f = new FreezableUSD();
         nft = new IDMRecords("IDM Records", "RECORDS", owner, signer, IERC20Like(address(f)), IBalanceOf(address(idm)), "x/", royalty, 500);
+        _openAll();
         f.mint(label, 1e12);
         vm.prank(label);
         f.approve(address(nft), type(uint256).max);
@@ -555,6 +563,7 @@ contract IDMRecordsTest is Test {
     function test_pull_countsWhatArrived() public {
         FeeUSD f = new FeeUSD();
         nft = new IDMRecords("IDM Records", "RECORDS", owner, signer, IERC20Like(address(f)), IBalanceOf(address(idm)), "x/", royalty, 500);
+        _openAll();
         f.mint(label, 1e12);
         vm.prank(label);
         f.approve(address(nft), type(uint256).max);
@@ -701,7 +710,7 @@ contract IDMRecordsTest is Test {
         vm.expectRevert(IDMRecords.NotOwner.selector);
         nft.setTransferValidator(alice);
         vm.expectRevert(IDMRecords.NotOwner.selector);
-        nft.lockTransferValidator();
+        nft.setMintableUpTo(1);
         vm.stopPrank();
     }
 
@@ -818,7 +827,9 @@ contract IDMRecordsTest is Test {
         assertEq(nft.ownerOf(1), bob);
     }
 
-    function test_transferValidator_andLock() public {
+    /// Swarm audit 2026-11-13 (finding 1): a validator that refuses every transfer can always be undone; there is
+    /// no lock that would make it permanent.
+    function test_transferValidator_ownerCanAlwaysUndo() public {
         _mint(alice, 1);
         BlockAll b = new BlockAll();
         vm.prank(owner);
@@ -826,14 +837,64 @@ contract IDMRecordsTest is Test {
         vm.prank(alice);
         vm.expectRevert(bytes("blocked"));
         nft.transferFrom(alice, bob, 1);
-        vm.startPrank(owner);
+        vm.prank(owner);
         nft.setTransferValidator(address(0));
-        nft.lockTransferValidator();
-        vm.expectRevert(IDMRecords.Locked.selector);
-        nft.setTransferValidator(address(b));
-        vm.stopPrank();
         vm.prank(alice);
         nft.transferFrom(alice, bob, 1);
+        assertEq(nft.ownerOf(1), bob);
+    }
+
+    /// Swarm audit 2026-11-13 (finding 2): a leaked signer key mints only the ids the owner opened. Ids above
+    /// `mintableUpTo` are refused, a lower value closes what is not minted yet, and nothing above the cap opens.
+    function test_mintableUpTo_boundsWhatAVoucherCanMint() public {
+        vm.prank(owner);
+        nft.setMintableUpTo(37);
+        _mint(alice, 37);
+        IDMRecords.Voucher memory v = _voucher(bob, 38, 1, 100);
+        bytes memory sig = _sign(v, signerKey);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(IDMRecords.NotOpen.selector, 38, 37));
+        nft.mint(v, sig);
+
+        vm.prank(owner);
+        nft.setMintableUpTo(10); // the drop closed: the rest of it is shut, minted tokens stay
+        assertEq(nft.ownerOf(37), alice);
+        v = _voucher(bob, 11, 1, 100);
+        sig = _sign(v, signerKey);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(IDMRecords.NotOpen.selector, 11, 10));
+        nft.mint(v, sig);
+
+        vm.prank(owner);
+        vm.expectRevert(IDMRecords.BadTokenId.selector);
+        nft.setMintableUpTo(1001);
+        vm.prank(owner);
+        nft.setMintableUpTo(0);
+        v = _voucher(bob, 1, 1, 100);
+        sig = _sign(v, signerKey);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(IDMRecords.NotOpen.selector, 1, 0));
+        nft.mint(v, sig);
+    }
+
+    /// Swarm audit 2026-11-13 (finding 5): an operator approved for all claims for a holder without code only; a
+    /// contract holder (an escrow, a Safe) asks for its own rewards.
+    function test_claim_operatorCannotPushRewardsIntoAContract() public {
+        Submitter escrow = new Submitter(nft);
+        _mint(alice, 3);
+        vm.prank(alice);
+        nft.transferFrom(alice, address(escrow), 3);
+        vm.prank(address(escrow));
+        nft.setApprovalForAll(bob, true);
+        vm.prank(label);
+        nft.depositPool(100e6);
+        uint256[] memory ids = _ids(3);
+        vm.prank(bob);
+        vm.expectRevert(IDMRecords.NotAuthorized.selector);
+        nft.claim(ids);
+        vm.prank(address(escrow));
+        nft.claim(ids);
+        assertEq(usd.balanceOf(address(escrow)), 100e6);
     }
 
     function test_twoStepOwnership() public {
