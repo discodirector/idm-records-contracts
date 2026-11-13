@@ -18,12 +18,14 @@ interface IERC20Rewards {
 ///
 ///         Leaf: (tokenId, account, pushable, cumulative). `claim` pays `cumulative - claimed[tokenId]` to `account`.
 ///         `pushable` leaves (the holder is a plain wallet on Robinhood, whose key also controls the address on Base)
-///         may be claimed by anyone for the account, so a bot can pay holders without them sending a transaction.
-///         Other leaves (the holder is a contract there: a Safe, an escrow, a marketplace) only by `account` itself.
+///         may be claimed by anyone for the account, so a bot can pay holders without them sending a transaction,
+///         as long as the account has no code on Base. Other leaves (the holder is a contract there: a Safe, an
+///         escrow, a marketplace), and accounts with code on Base, only by `account` itself.
 ///
 ///         What the keeper cannot do: pay out more than arrived. A root carries the sum of its leaves (`total`); a
 ///         root above the USDC ever received (balance + everything claimed) is refused, and claims stop at `total`.
-///         A bad root could misdirect money but never overdraw. Totals only grow, root to root. Every root waits
+///         A bad root could misdirect money but never overdraw; a root that gives a token less than it already took
+///         leaves the others' claims paid in part up to `total`, the rest owed until a corrected root. Totals only grow, root to root. Every root waits
 ///         `rootDelay` (at least 1 h) before it pays, and the owner or the guardian (a watcher's key that can only
 ///         revoke) can revoke it in that time. The keeper cannot revoke: a revoke and a new root under the same epoch
 ///         number is how a leaked keeper key would swap an honest root for its own. The owner can rotate the keeper
@@ -77,7 +79,10 @@ contract HolderRewards {
     event RootProposed(uint32 indexed epoch, bytes32 root, uint256 total, bytes32 dataHash, uint64 validFrom);
     event RootActivated(uint32 indexed epoch, bytes32 root, uint256 total);
     event RootRevoked(uint32 indexed epoch, bytes32 root, address by);
+    /// @dev `cumulative`: what the token has been paid in all, after this claim.
     event Claimed(uint256 indexed tokenId, address indexed account, uint256 amount, uint256 cumulative);
+    /// @dev A batch skipped this leaf: its account may not be pushed to, or its USDC transfer failed. Still owed.
+    event ClaimFailed(uint256 indexed tokenId, address indexed account, uint256 amount);
     event KeeperSet(address keeper);
     event GuardianSet(address guardian);
     event Swept(address indexed token, address indexed to, uint256 amount);
@@ -99,7 +104,6 @@ contract HolderRewards {
     error OverReceived(uint256 total, uint256 received);
     error NotAccount();
     error BadProof();
-    error OverTotal();
     error TransferFailed();
 
     constructor(
@@ -185,32 +189,71 @@ contract HolderRewards {
 
     // ---------------------------------------------------------------- claims
 
-    /// @notice Pays a token's unclaimed rewards to the account the current root names for it.
+    /// @notice Pays a token's unclaimed rewards to the account the current root names for it. Anyone may push a
+    ///         `pushable` leaf for a plain account; an account with code on Base (a contract, an escrow, a delegated
+    ///         EIP-7702 wallet) is only paid when it claims itself, so USDC is never pushed into a contract that may
+    ///         not move it (audit 2026-11-13, as IDMRecords.claim). When an earlier claim took more than a later root
+    ///         gives that token (a keeper mistake), the root's total cannot cover every leaf: a claim pays what the
+    ///         total still covers and the rest stays owed to the token, so one bad leaf never stops the others.
     /// @return amount Paid now (0 when nothing new).
     function claim(uint256 tokenId, address account, bool pushable, uint256 cumulative, bytes32[] calldata proof)
         public
         returns (uint256 amount)
     {
         _activate();
-        if (!pushable && msg.sender != account) revert NotAccount();
+        if (msg.sender != account && (!pushable || account.code.length != 0)) revert NotAccount();
+        amount = _owed(tokenId, account, pushable, cumulative, proof);
+        if (amount == 0) return 0;
+        _book(tokenId, amount);
+        if (!_send(account, amount)) revert TransferFailed();
+        emit Claimed(tokenId, account, amount, claimed[tokenId]);
+    }
+
+    /// @notice Pushes many claims. A leaf this call may not push (its account has code or is not pushable) or whose
+    ///         USDC transfer fails (a frozen account, a paused token) is skipped with `ClaimFailed` and keeps its
+    ///         rewards; the others are still paid. A bad proof still reverts the whole batch.
+    function claimMany(Claim[] calldata claims) external returns (uint256 total) {
+        _activate();
+        for (uint256 i; i < claims.length; ++i) {
+            Claim calldata c = claims[i];
+            uint256 amount = _owed(c.tokenId, c.account, c.pushable, c.cumulative, c.proof);
+            if (amount == 0) continue;
+            if (msg.sender != c.account && (!c.pushable || c.account.code.length != 0)) {
+                emit ClaimFailed(c.tokenId, c.account, amount);
+                continue;
+            }
+            _book(c.tokenId, amount);
+            if (!_send(c.account, amount)) {
+                claimed[c.tokenId] -= amount;
+                totalClaimed -= amount;
+                emit ClaimFailed(c.tokenId, c.account, amount);
+                continue;
+            }
+            emit Claimed(c.tokenId, c.account, amount, claimed[c.tokenId]);
+            total += amount;
+        }
+    }
+
+    /// @dev What a valid leaf of the current root may be paid now: its unclaimed part, at most what the root's total
+    ///      still covers. Reverts on a bad proof.
+    function _owed(uint256 tokenId, address account, bool pushable, uint256 cumulative, bytes32[] calldata proof)
+        private
+        view
+        returns (uint256 amount)
+    {
         Root storage r = _current;
         if (!_verify(proof, r.root, leaf(tokenId, account, pushable, cumulative))) revert BadProof();
         uint256 done = claimed[tokenId];
         if (cumulative <= done) return 0;
         amount = cumulative - done;
-        uint256 paid = totalClaimed + amount;
-        if (paid > r.total) revert OverTotal();
-        claimed[tokenId] = cumulative;
-        totalClaimed = paid;
-        emit Claimed(tokenId, account, amount, cumulative);
-        _send(account, amount);
+        // Totals never decrease root to root, so totalClaimed <= r.total.
+        uint256 left = r.total - totalClaimed;
+        if (amount > left) amount = left;
     }
 
-    function claimMany(Claim[] calldata claims) external returns (uint256 total) {
-        for (uint256 i; i < claims.length; ++i) {
-            Claim calldata c = claims[i];
-            total += claim(c.tokenId, c.account, c.pushable, c.cumulative, c.proof);
-        }
+    function _book(uint256 tokenId, uint256 amount) private {
+        claimed[tokenId] += amount;
+        totalClaimed += amount;
     }
 
     /// @notice The leaf hash, as the keeper builds it (OpenZeppelin StandardMerkleTree style: double keccak of the
@@ -248,9 +291,10 @@ contract HolderRewards {
         emit Swept(token, sweepTo, amount);
     }
 
-    function _send(address to, uint256 amount) private {
+    /// @dev A USDC transfer; false when it reverts or returns false (nothing is sent then).
+    function _send(address to, uint256 amount) private returns (bool) {
         (bool ok, bytes memory ret) = address(usdc).call(abi.encodeCall(IERC20Rewards.transfer, (to, amount)));
-        if (!ok || (ret.length != 0 && !abi.decode(ret, (bool)))) revert TransferFailed();
+        return ok && (ret.length == 0 || (ret.length == 32 && abi.decode(ret, (bool))));
     }
 
     // ---------------------------------------------------------------- owner

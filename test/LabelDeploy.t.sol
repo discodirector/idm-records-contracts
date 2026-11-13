@@ -186,11 +186,12 @@ contract DeployRecordsTest is LabelDeployFixture {
         DeployRecords.Deployment memory d = script.deploy(c);
         script.check(c, d);
 
-        // Three creations, then setRoyalty and setMintableUpTo; nothing else.
-        assertEq(vm.getNonce(deployer), nonce + 5);
+        // Four creations, then setRoyalty and setMintableUpTo; nothing else.
+        assertEq(vm.getNonce(deployer), nonce + 6);
         assertEq(address(d.records), vm.computeCreateAddress(deployer, nonce));
         assertEq(address(d.feeder), vm.computeCreateAddress(deployer, nonce + 1));
-        assertEq(address(d.splitter), vm.computeCreateAddress(deployer, nonce + 2));
+        assertEq(address(d.treasuryFeeder), vm.computeCreateAddress(deployer, nonce + 2));
+        assertEq(address(d.splitter), vm.computeCreateAddress(deployer, nonce + 3));
 
         assertEq(d.records.owner(), deployer);
         assertEq(d.records.signer(), signer);
@@ -204,18 +205,35 @@ contract DeployRecordsTest is LabelDeployFixture {
         assertEq(d.feeder.sweepTo(), infra);
         (address[] memory a,, bool[] memory e) = d.splitter.payees();
         assertEq(a[0], address(d.feeder));
-        assertEq(a[1], TREASURY);
+        // The burn quarter, ETH or USDG, goes through the TreasuryFeeder (USDG -> ETH -> PulseTreasury).
+        assertEq(a[1], address(d.treasuryFeeder));
         assertEq(a[2], infra);
-        assertTrue(e[1]);
+        assertFalse(e[1]);
         assertEq(d.splitter.tokenSink(), infra);
         assertEq(d.splitter.weth(), RH_WETH);
+        assertEq(d.treasuryFeeder.treasury(), TREASURY);
+        assertEq(d.treasuryFeeder.keeper(), keeper);
+        assertEq(d.treasuryFeeder.owner(), deployer);
+        assertEq(d.treasuryFeeder.sweepTo(), infra);
 
         // A royalty in ETH lands where it should.
         vm.deal(address(d.splitter), 1 ether);
         d.splitter.release();
         assertEq(address(d.feeder).balance, 0.5 ether);
-        assertEq(TREASURY.balance, 0.25 ether);
+        assertEq(address(d.treasuryFeeder).balance, 0.25 ether);
         assertEq(infra.balance, 0.25 ether);
+        vm.etch(USDG, address(new Usdc6()).code); // a real token from here on (the mock had no balanceOf)
+        uint256 before = TREASURY.balance;
+        vm.prank(keeper);
+        d.treasuryFeeder.swap(0, 0); // the keeper forwards it without a swap
+        assertEq(TREASURY.balance - before, 0.25 ether);
+
+        // A royalty in USDG: the burn quarter lands in the TreasuryFeeder too (swarm audit 2026-11-13), not infra.
+        Usdc6(USDG).mint(address(d.splitter), 100e6);
+        d.splitter.releaseToken(USDG);
+        assertEq(Usdc6(USDG).balanceOf(address(d.treasuryFeeder)), 25e6);
+        assertEq(Usdc6(USDG).balanceOf(infra), 25e6);
+        assertEq(Usdc6(USDG).balanceOf(address(d.feeder)), 50e6);
     }
 
     function test_ValidatorAndOwnerHandover() public {
@@ -228,8 +246,8 @@ contract DeployRecordsTest is LabelDeployFixture {
         script.checkInputs(c);
         uint64 nonce = vm.getNonce(deployer);
         DeployRecords.Deployment memory d = script.deploy(c);
-        // Three creations, setRoyalty, setTransferValidator, setMintableUpTo, the v5 rules, transferOwnership.
-        assertEq(vm.getNonce(deployer), nonce + 8);
+        // Four creations, setRoyalty, setTransferValidator, setMintableUpTo, the v5 rules, transferOwnership.
+        assertEq(vm.getNonce(deployer), nonce + 9);
         CollectionSecurityPolicy memory p = ITransferValidatorV5(LB_VALIDATOR).getCollectionSecurityPolicy(address(d.records));
         assertEq(p.rulesetOptions, 6);
         assertEq(p.rulesetId, 0);
@@ -345,7 +363,7 @@ contract DeployRecordsTest is LabelDeployFixture {
 
         // Another deployment's splitter is not this collection's royalty receiver.
         DeployRecords.Deployment memory mixed =
-            DeployRecords.Deployment(d.records, d.feeder, script.deploy(c).splitter);
+            DeployRecords.Deployment(d.records, d.feeder, d.treasuryFeeder, script.deploy(c).splitter);
         vm.expectRevert(bytes("IDMRecords mismatch: royalty"));
         script.check(c, mixed);
 
@@ -461,18 +479,20 @@ contract DeployRecordsTest is LabelDeployFixture {
         DeployRecords.Config memory c = recordsConfig();
         DeployRecords.Deployment memory d = script.deploy(c);
 
-        string[] memory names = new string[](3);
-        (names[0], names[1], names[2]) = ("IDMRecords", "RewardFeeder", "RevenueSplitter");
-        address[] memory addrs = new address[](3);
-        (addrs[0], addrs[1], addrs[2]) = (address(d.records), address(d.feeder), address(d.splitter));
+        string[] memory names = new string[](4);
+        (names[0], names[1], names[2], names[3]) = ("IDMRecords", "RewardFeeder", "TreasuryFeeder", "RevenueSplitter");
+        address[] memory addrs = new address[](4);
+        (addrs[0], addrs[1], addrs[2], addrs[3]) =
+            (address(d.records), address(d.feeder), address(d.treasuryFeeder), address(d.splitter));
         string memory bfile = "deployments/test-broadcast-records.preview.json";
         vm.writeFile(bfile, broadcastJson(names, addrs, "0x1"));
-        LabelDeployBase.Created[3] memory x = script.fromBroadcast(bfile);
+        LabelDeployBase.Created[4] memory x = script.fromBroadcast(bfile);
         assertEq(x[0].addr, address(d.records));
         assertEq(x[1].addr, address(d.feeder));
-        assertEq(x[2].addr, address(d.splitter));
+        assertEq(x[2].addr, address(d.treasuryFeeder));
+        assertEq(x[3].addr, address(d.splitter));
         assertEq(x[0].tx, bytes32(uint256(1)));
-        assertEq(x[2].blockNumber, 102);
+        assertEq(x[3].blockNumber, 103);
 
         string memory rfile = "deployments/test-records.preview.json";
         script.writeRecord(c, d, x, "verified", rfile);
@@ -483,6 +503,7 @@ contract DeployRecordsTest is LabelDeployFixture {
         assertEq(vm.parseJsonBytes32(json, ".recordsTx"), bytes32(uint256(1)));
         assertEq(vm.parseJsonUint(json, ".recordsBlock"), 100);
         assertEq(vm.parseJsonAddress(json, ".rewardFeeder"), address(d.feeder));
+        assertEq(vm.parseJsonAddress(json, ".treasuryFeeder"), address(d.treasuryFeeder));
         assertEq(vm.parseJsonAddress(json, ".royaltySplitter"), address(d.splitter));
         assertEq(vm.parseJsonAddress(json, ".signer"), signer);
         assertEq(vm.parseJsonAddress(json, ".keeper"), keeper);
@@ -575,13 +596,14 @@ contract DeployLabelTest is LabelDeployFixture {
         assertEq(d.splitter.weth(), address(0)); // even if asked
     }
 
-    function test_GuardianOptional() public {
+    /// Swarm audit 2026-11-13: nothing stops a root once it matured, so the deploy needs the guardian's watcher.
+    function test_GuardianRequired() public {
         DeployLabel.Config memory c = labelConfig();
         c.guardian = address(0);
-        script.checkInputs(c);
+        _expectInput(
+            c, "REWARDS_GUARDIAN: required (the watcher's revoke-only key, docs/DEPLOY.md); a bad root cannot be stopped once it matures"
+        );
         DeployLabel.Deployment memory d = script.deploy(c);
-        script.check(c, d);
-        assertEq(d.rewards.guardian(), address(0));
         vm.expectRevert(bytes("HolderRewards mismatch: guardian"));
         script.check(labelConfig(), d);
     }
@@ -709,7 +731,7 @@ contract DeployStationsSplitTest is LabelDeployFixture {
 
     function _baseConfig(address rewards) internal view returns (DeployStationsSplit.Config memory) {
         return DeployStationsSplit.Config(
-            deployer, rewards, burn, imdBurn, infra, rewards, burn, address(0), address(0), address(0)
+            deployer, rewards, burn, imdBurn, infra, rewards, burn, address(0), address(0), address(0), address(0), address(0)
         );
     }
 
@@ -737,7 +759,8 @@ contract DeployStationsSplitTest is LabelDeployFixture {
         script.check(w, d);
     }
 
-    /// Robinhood: holders' quarter to RewardFeeder (of the deployed IDM Records), $IDM quarter to a new TreasuryFeeder.
+    /// Robinhood: holders' quarter to RewardFeeder (of the deployed IDM Records), $IDM quarter to DeployRecords'
+    /// TreasuryFeeder (the royalty splitter's token sink too).
     function _robinhood() internal returns (DeployStationsSplit.Config memory c, RewardFeeder feeder) {
         mockRobinhood();
         vm.etch(USDG, address(new Usdc6()).code);
@@ -748,9 +771,12 @@ contract DeployStationsSplitTest is LabelDeployFixture {
         feeder = new RewardFeeder(
             IPoolManager(POOL_MANAGER), IRecordsPot(address(records)), deployer, keeper, infra, 500, 10, 1500e6
         );
+        // ~2249 USDG per ETH in the mocked pool: ceiling 2800 is inside the 0-50% band.
+        TreasuryFeeder t =
+            new TreasuryFeeder(IPoolManager(POOL_MANAGER), USDG, TREASURY, deployer, keeper, infra, 500, 10, 2800e6);
         c = DeployStationsSplit.Config(
             deployer, address(feeder), address(0), imdBurn, infra, address(feeder), address(0), address(records),
-            deployer, keeper
+            deployer, keeper, address(t), address(t)
         );
     }
 
@@ -775,6 +801,11 @@ contract DeployStationsSplitTest is LabelDeployFixture {
         assertEq(Usdc6(USDG).balanceOf(address(feeder)), 10e6);
         assertEq(Usdc6(USDG).balanceOf(address(t)), 10e6);
         assertEq(Usdc6(USDG).balanceOf(imdBurn), 10e6);
+
+        assertEq(address(t), c.treasuryFeeder); // not a new one
+        uint64 nonce = vm.getNonce(deployer);
+        script.deploy(c);
+        assertEq(vm.getNonce(deployer), nonce + 1); // only the splitter
 
         DeployStationsSplit.Config memory w = _copy(c);
         w.keeper = other;
@@ -811,6 +842,14 @@ contract DeployStationsSplitTest is LabelDeployFixture {
         w = _copy(c);
         w.imdBurn = infra;
         vm.expectRevert(bytes("stations payees: must be four different addresses"));
+        script.checkInputs(w);
+        w = _copy(c);
+        w.recordTreasuryFeeder = address(0);
+        vm.expectRevert(bytes("TREASURY_FEEDER: no verified record of it (run DeployRecords verify() first)"));
+        script.checkInputs(w);
+        w = _copy(c);
+        w.treasuryFeeder = other;
+        vm.expectRevert(bytes("TREASURY_FEEDER: not the one in the verified deployment record"));
         script.checkInputs(w);
         // A lookalike feeder (right answers, other code) is refused.
         address fake = makeAddr("fake feeder");
@@ -896,10 +935,11 @@ contract LabelDeployEnvTest is LabelDeployFixture {
         assertEq(ITransferValidatorV5(LB_VALIDATOR).getCollectionSecurityPolicy(address(d.records)).rulesetOptions, 6);
 
         // verify() from a broadcast file ...
-        string[] memory names = new string[](3);
-        (names[0], names[1], names[2]) = ("IDMRecords", "RewardFeeder", "RevenueSplitter");
-        address[] memory addrs = new address[](3);
-        (addrs[0], addrs[1], addrs[2]) = (address(d.records), address(d.feeder), address(d.splitter));
+        string[] memory names = new string[](4);
+        (names[0], names[1], names[2], names[3]) = ("IDMRecords", "RewardFeeder", "TreasuryFeeder", "RevenueSplitter");
+        address[] memory addrs = new address[](4);
+        (addrs[0], addrs[1], addrs[2], addrs[3]) =
+            (address(d.records), address(d.feeder), address(d.treasuryFeeder), address(d.splitter));
         string memory bfile = "deployments/test-env-broadcast.preview.json";
         vm.writeFile(bfile, broadcastJson(names, addrs, "0x1"));
         vm.setEnv("DEPLOY_BROADCAST", bfile);
@@ -908,13 +948,14 @@ contract LabelDeployEnvTest is LabelDeployFixture {
         records.verify();
         json = vm.readFile(verified);
         assertEq(vm.parseJsonString(json, ".status"), "verified");
-        assertEq(vm.parseJsonBytes32(json, ".royaltySplitterTx"), bytes32(uint256(3)));
+        assertEq(vm.parseJsonBytes32(json, ".royaltySplitterTx"), bytes32(uint256(4)));
 
-        // ... or from env, all three or none.
+        // ... or from env, all four or none.
         vm.setEnv("RECORDS_CONTRACT", vm.toString(address(d.records)));
-        vm.expectRevert(bytes("set all of RECORDS_CONTRACT, PAYOUT_FEEDER, PAYOUT_SPLITTER, or none"));
+        vm.expectRevert(bytes("set all of RECORDS_CONTRACT, PAYOUT_FEEDER, TREASURY_FEEDER, PAYOUT_SPLITTER, or none"));
         records.verify();
         vm.setEnv("PAYOUT_FEEDER", vm.toString(address(d.feeder)));
+        vm.setEnv("TREASURY_FEEDER", vm.toString(address(d.treasuryFeeder)));
         vm.setEnv("PAYOUT_SPLITTER", vm.toString(address(d.splitter)));
         records.verify();
 
@@ -936,6 +977,7 @@ contract LabelDeployEnvTest is LabelDeployFixture {
         mockBase();
         DeployLabel label = new DeployLabel();
         vm.setEnv("REWARDS_KEEPER", vm.toString(rewardsKeeper));
+        vm.setEnv("REWARDS_GUARDIAN", vm.toString(guardian));
         vm.setEnv("BRIDGE_BURN", vm.toString(burn));
         string memory labelPreview = "deployments/test-env-label.preview.json";
         vm.setEnv("DEPLOY_RECORD", labelPreview);
@@ -1031,14 +1073,30 @@ contract LabelDeployForkTest is LabelDeployFixture {
         uint256 treasuryBefore = TREASURY.balance;
         d.splitter.unwrapWeth();
         d.splitter.release();
-        assertEq(TREASURY.balance - treasuryBefore, 0.01 ether);
+        assertEq(address(d.treasuryFeeder).balance, 0.01 ether); // the burn quarter, via the TreasuryFeeder
         assertEq(infra.balance, 0.01 ether);
         assertEq(address(d.feeder).balance, 0.02 ether);
+        vm.prank(keeper);
+        d.treasuryFeeder.swap(0, 0); // ETH needs no swap: on to PulseTreasury
+        assertEq(TREASURY.balance - treasuryBefore, 0.01 ether);
+
+        // A royalty paid in USDG: its burn quarter is swapped to ETH for PulseTreasury, not left with infra.
+        deal(USDG, address(d.splitter), 40e6);
+        d.splitter.releaseToken(USDG);
+        assertEq(IERC20View(USDG).balanceOf(address(d.treasuryFeeder)), 10e6);
+        assertEq(IERC20View(USDG).balanceOf(infra), 10e6);
+        assertEq(IERC20View(USDG).balanceOf(address(d.feeder)), 20e6);
+        vm.prank(keeper);
+        (uint256 usdgIn, uint256 ethOut,) = d.treasuryFeeder.swap(type(uint256).max, 0);
+        assertEq(usdgIn, 10e6);
+        assertGt(ethOut, 0);
+        assertEq(TREASURY.balance - treasuryBefore, 0.01 ether + ethOut);
+        deal(USDG, address(d.feeder), 0); // the rest of this rehearsal starts from an empty feeder
 
         // The Stations holders' quarter (USDG) and the royalty ETH, fed as the payout keeper does it: all to the pool.
         deal(USDG, address(d.feeder), 1e6);
         vm.prank(keeper);
-        (uint256 out, uint256 pooled) = d.feeder.feed(20e6); // 0.02 ETH is ~$45
+        (uint256 out, uint256 pooled) = d.feeder.feed(type(uint256).max, 20e6); // 0.02 ETH is ~$45
         assertGt(out, 20e6);
         assertEq(pooled, out + 1e6);
         assertEq(d.records.claimable(7), 1e6 + out);
@@ -1195,8 +1253,10 @@ contract LabelDeployForkTest is LabelDeployFixture {
         assertEq(IERC20View(BASE_USDC).balanceOf(infra), 5e6);
         assertEq(IERC20View(BASE_USDC).balanceOf(address(d.splitter)), 0);
 
-        // A one-leaf root for token 7, held by a plain wallet: anyone pushes it after the delay.
-        address alice = makeAddr("alice");
+        // A one-leaf root for token 7, held by a plain wallet: anyone pushes it after the delay. (Not makeAddr("alice"):
+        // that well-known test address has code on Base, and since the swarm audit an account with code claims itself.)
+        address alice = makeAddr("idm records holder 7");
+        assertEq(alice.code.length, 0);
         bytes32 leaf = d.rewards.leaf(7, alice, true, 10e6);
         vm.prank(rewardsKeeper);
         d.rewards.proposeRoot(1, leaf, 10e6, keccak256("epoch 1"));

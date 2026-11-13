@@ -6,10 +6,12 @@ import {IERC20Minimal} from "v4-core/src/interfaces/external/IERC20Minimal.sol";
 import {EthPoolSwap} from "./EthPoolSwap.sol";
 import {KeeperOwned} from "./KeeperOwned.sol";
 
-/// @title TreasuryFeeder — the $IDM quarter of Stations payments on Robinhood, USDG to ETH, into PulseTreasury
-/// @notice The Robinhood Stations splitter pays its $IDM buy-and-burn quarter here in USDG. `swap` turns all the USDG
-///         it holds into ETH in the ETH/USDG Uniswap v4 pool and sends every wei it holds to PulseTreasury, which can
-///         only buy $IDM with it and burn it. ETH sent here goes the same way. No owner withdrawal, no upgrade.
+/// @title TreasuryFeeder — the $IDM buy-and-burn share of label money on Robinhood, USDG to ETH, into PulseTreasury
+/// @notice Two payers send money here: the Robinhood Stations splitter (its $IDM quarter, USDG) and the royalty
+///         splitter (its $IDM quarter, in whatever currency the royalty came: ETH, or USDG). `swap` turns the
+///         USDG it holds (up to the keeper's per-call limit) into ETH in the ETH/USDG Uniswap v4 pool and sends every
+///         wei it holds to PulseTreasury, which can only buy $IDM with it and burn it. ETH sent here goes the same way.
+///         No owner withdrawal, no upgrade.
 ///
 ///         Only the keeper swaps, with a `minOut` from a fresh quote (an open swap could be sandwiched). A ceiling the
 ///         keeper cannot change bounds the swap too: `maxUsdgPerEth`, set by the owner, so a leaked keeper key that
@@ -71,17 +73,22 @@ contract TreasuryFeeder is EthPoolSwap, KeeperOwned {
 
     receive() external payable {}
 
-    /// @notice Swaps all USDG held (if any) to ETH, then sends all ETH held to PulseTreasury. Keeper only.
+    /// @notice Swaps up to `maxUsdgIn` of the USDG held to ETH, then sends all ETH held to PulseTreasury. Keeper only.
+    ///         The swap and the sending do not depend on each other: `swap(0, 0)` sends the ETH held without swapping,
+    ///         and a balance the pool cannot take inside the ceiling in one swap is swapped in slices (audit
+    ///         2026-11-13). USDG not swapped waits here for the next call.
+    /// @param maxUsdgIn Most USDG (6-decimal units) swapped in this call; the rest waits.
     /// @param minOut Least ETH (wei) the swap may return; ignored when no USDG is swapped.
-    function swap(uint256 minOut) external onlyKeeper returns (uint256 usdgIn, uint256 ethOut, uint256 sent) {
-        usdgIn = IERC20Minimal(usdg).balanceOf(address(this));
+    function swap(uint256 maxUsdgIn, uint256 minOut) external onlyKeeper returns (uint256 usdgIn, uint256 ethOut, uint256 sent) {
+        uint256 held = IERC20Minimal(usdg).balanceOf(address(this));
+        usdgIn = held < maxUsdgIn ? held : maxUsdgIn;
         // Dust USDG waits; the ETH held still goes to the treasury.
         if (usdgIn < MIN_SWAP_IN) usdgIn = 0;
         if (usdgIn > 0) {
             ethOut = _swap(false, usdgIn);
             if (ethOut < minOut) revert TooLittle(ethOut, minOut);
-            // A pool short of liquidity takes less than all of it; what is left waits for the next swap.
-            usdgIn -= IERC20Minimal(usdg).balanceOf(address(this));
+            // A pool short of liquidity takes less than asked; what is left waits for the next swap.
+            usdgIn = held - IERC20Minimal(usdg).balanceOf(address(this));
             if (usdgIn * 1e18 > ethOut * maxUsdgPerEth) revert AboveCeiling(usdgIn, ethOut, maxUsdgPerEth);
         }
         sent = address(this).balance;

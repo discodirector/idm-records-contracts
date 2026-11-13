@@ -20,7 +20,8 @@ import {LabelDeployBase} from "./LabelDeployBase.s.sol";
 ///         deployments/label-base.preview.json; `verify()` reads the live contracts, checks their code against this
 ///         build and writes deployments/label-base.json.
 /// @dev Env: DEPLOYER, REWARDS_KEEPER, BRIDGE_BURN, LABEL_INFRA; optional REWARDS_OWNER (default DEPLOYER),
-///      REWARDS_GUARDIAN (the watcher's revoke-only key; default none), REWARDS_DELAY (seconds, default 12 h).
+///      REWARDS_GUARDIAN (the watcher's revoke-only key; required: once a bad root matures nothing stops it, swarm
+///      audit 2026-11-13), REWARDS_DELAY (seconds, default 12 h).
 ///      LABEL_WETH is refused on Base. verify() optional: HOLDER_REWARDS + LABEL_SPLITTER (both) instead of the
 ///      broadcast file.
 contract DeployLabel is LabelDeployBase {
@@ -38,7 +39,7 @@ contract DeployLabel is LabelDeployBase {
         address owner;
         /// @dev HolderRewards keeper: the rewards bot's key (posts roots, releases the splitters), gas only.
         address keeper;
-        /// @dev HolderRewards guardian: the watcher's key on another host, may only revoke a pending root. 0 = none.
+        /// @dev HolderRewards guardian: the watcher's key on another host, may only revoke a pending root. Required.
         address guardian;
         uint64 rootDelay;
         /// @dev Keeper-held EOA: bridges its USDC to Robinhood as ETH, forwarded to PulseTreasury.
@@ -102,14 +103,17 @@ contract DeployLabel is LabelDeployBase {
         _distinct(c.burn, c.owner, "BRIDGE_BURN and REWARDS_OWNER");
         _isEoa(c.keeper, "REWARDS_KEEPER");
         _isEoa(c.burn, "BRIDGE_BURN");
-        if (c.guardian != address(0)) {
-            _distinct(c.guardian, c.keeper, "REWARDS_GUARDIAN and REWARDS_KEEPER");
-            _distinct(c.guardian, c.deployer, "REWARDS_GUARDIAN and DEPLOYER");
-            _distinct(c.guardian, c.owner, "REWARDS_GUARDIAN and REWARDS_OWNER");
-            _distinct(c.guardian, c.burn, "REWARDS_GUARDIAN and BRIDGE_BURN");
-            _distinct(c.guardian, c.infra, "REWARDS_GUARDIAN and LABEL_INFRA");
-            _isEoa(c.guardian, "REWARDS_GUARDIAN");
-        }
+        // A root that matures cannot be stopped; the guardian's watcher is what revokes a bad one in time.
+        require(
+            c.guardian != address(0),
+            "REWARDS_GUARDIAN: required (the watcher's revoke-only key, docs/DEPLOY.md); a bad root cannot be stopped once it matures"
+        );
+        _distinct(c.guardian, c.keeper, "REWARDS_GUARDIAN and REWARDS_KEEPER");
+        _distinct(c.guardian, c.deployer, "REWARDS_GUARDIAN and DEPLOYER");
+        _distinct(c.guardian, c.owner, "REWARDS_GUARDIAN and REWARDS_OWNER");
+        _distinct(c.guardian, c.burn, "REWARDS_GUARDIAN and BRIDGE_BURN");
+        _distinct(c.guardian, c.infra, "REWARDS_GUARDIAN and LABEL_INFRA");
+        _isEoa(c.guardian, "REWARDS_GUARDIAN");
         require(
             c.rootDelay >= MIN_ROOT_DELAY && c.rootDelay <= 7 days, "REWARDS_DELAY: between 3600 (1 h) and 604800 (7 days)"
         );
@@ -169,7 +173,7 @@ contract DeployLabel is LabelDeployBase {
         console2.log("  HolderRewards (no withdrawal)   ", address(d.rewards));
         console2.log("    owner (rotate keeper, revoke) ", c.owner);
         console2.log("    keeper (posts roots, gas only)", c.keeper);
-        console2.log("    guardian (revoke only, 0=none)", c.guardian);
+        console2.log("    guardian (revoke only)        ", c.guardian);
         console2.log("    sweep to (ETH, other tokens)  ", c.infra);
         console2.log("    root delay (seconds)          ", uint256(c.rootDelay));
         _logSplit(d.splitter, split(c, address(d.rewards)), "HolderRewards                   ", "burn bridge wallet (-> ETH)     ");

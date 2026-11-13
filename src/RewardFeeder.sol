@@ -14,8 +14,8 @@ interface IRecordsPot {
 
 /// @title RewardFeeder — the NFT holders' share on Robinhood, into the IDM Records reward pot's shared pool
 /// @notice Receives the holders' share of label money paid on Robinhood: ETH from the royalty splitter, USDG from the
-///         Stations splitter. `feed` swaps the ETH to the reward token (USDG) in one Uniswap v4 pool and deposits
-///         everything it holds into the pot's shared pool. No per-track credits here: a track's own x402 sales are
+///         Stations splitter. `feed` swaps the ETH (up to the keeper's per-call limit) to the reward token (USDG) in
+///         one Uniswap v4 pool and deposits everything it holds into the pot's shared pool. No per-track credits here: a track's own x402 sales are
 ///         paid on Base (HolderRewards). The reward token can only ever leave into the pot.
 ///
 ///         Only the keeper feeds, with a `minOut` from a fresh quote (a swap with a caller-chosen minimum could be
@@ -81,19 +81,24 @@ contract RewardFeeder is EthPoolSwap, KeeperOwned {
 
     receive() external payable {}
 
-    /// @notice Swaps all ETH held (if any) to the reward token and pools everything held. Keeper only.
+    /// @notice Swaps up to `maxEthIn` of the ETH held to the reward token and pools everything held. Keeper only.
+    ///         The swap and the pooling do not depend on each other: `feed(0, 0)` pools the USDG held without swapping,
+    ///         and a balance the pool cannot take inside the floor in one swap is fed in slices (audit 2026-11-13).
+    ///         ETH not swapped waits here for the next feed.
+    /// @param maxEthIn Most ETH (wei) swapped in this call; the rest waits.
     /// @param minOut Least reward token the swap may return; ignored when no ETH is swapped.
-    function feed(uint256 minOut) external onlyKeeper returns (uint256 swappedOut, uint256 pooled) {
+    function feed(uint256 maxEthIn, uint256 minOut) external onlyKeeper returns (uint256 swappedOut, uint256 pooled) {
         lastFeed = uint64(block.timestamp);
-        uint256 ethIn = address(this).balance;
+        uint256 held = address(this).balance;
+        uint256 ethIn = held < maxEthIn ? held : maxEthIn;
         // Dust ETH (worth under MIN_SWAP_OUT at the floor) waits; the USDG held is pooled anyway.
         if (ethIn * minUsdgPerEth < MIN_SWAP_OUT * 1e18) ethIn = 0;
         if (ethIn > 0) {
             swappedOut = _swap(true, ethIn);
             if (swappedOut < minOut) revert TooLittle(swappedOut, minOut);
-            // A pool short of liquidity takes less than all of it; the floor is checked on what was paid.
-            uint256 paid = ethIn - address(this).balance;
-            if (swappedOut * 1e18 < paid * minUsdgPerEth) revert BelowFloor(paid, swappedOut, minUsdgPerEth);
+            // A pool short of liquidity takes less than asked; the floor is checked on what was paid.
+            ethIn = held - address(this).balance;
+            if (swappedOut * 1e18 < ethIn * minUsdgPerEth) revert BelowFloor(ethIn, swappedOut, minUsdgPerEth);
         }
         // The pool splits among tokens minted now; with none minted yet the money waits here for the first.
         IERC20Minimal token = IERC20Minimal(rewardToken);

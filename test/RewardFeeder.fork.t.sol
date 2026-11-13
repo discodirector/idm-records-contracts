@@ -105,7 +105,7 @@ contract FeederForkTest is Test {
         assertEq(address(feeder).balance, 0.5 ether);
 
         vm.prank(keeper);
-        (uint256 out, uint256 pooled) = feeder.feed(500e6); // ~$1100 at ~$2250/ETH
+        (uint256 out, uint256 pooled) = feeder.feed(type(uint256).max, 500e6); // ~$1100 at ~$2250/ETH
         assertGt(out, 500e6);
         assertEq(pooled, out);
         assertEq(address(feeder).balance, 0);
@@ -118,7 +118,7 @@ contract FeederForkTest is Test {
         _mint(alice, 2);
         deal(USDG, address(feeder), 10e6); // the Stations splitter's holders' quarter
         vm.prank(keeper);
-        (uint256 out, uint256 pooled) = feeder.feed(0);
+        (uint256 out, uint256 pooled) = feeder.feed(type(uint256).max, 0);
         assertEq(out, 0);
         assertEq(pooled, 10e6);
         assertEq(nft.claimable(1), 5e6);
@@ -129,7 +129,7 @@ contract FeederForkTest is Test {
         vm.deal(address(feeder), 0.01 ether);
         vm.prank(keeper);
         vm.expectRevert();
-        feeder.feed(1_000_000e6);
+        feeder.feed(type(uint256).max, 1_000_000e6);
     }
 
     /// Review PoC (HIGH): after 7 days of keeper silence anyone could feed with ids/amounts of their choice and credit
@@ -143,7 +143,7 @@ contract FeederForkTest is Test {
         vm.warp(block.timestamp + 365 days);
         vm.prank(mallory);
         vm.expectRevert(KeeperOwned.NotKeeper.selector);
-        feeder.feed(0);
+        feeder.feed(type(uint256).max, 0);
         // The old ABI (ids, amounts) is gone: a call with it matches no function.
         uint256[] memory ids = new uint256[](1);
         ids[0] = 7;
@@ -160,9 +160,9 @@ contract FeederForkTest is Test {
         feeder.setKeeper(next);
         vm.prank(keeper);
         vm.expectRevert(KeeperOwned.NotKeeper.selector);
-        feeder.feed(0);
+        feeder.feed(type(uint256).max, 0);
         vm.prank(next);
-        (uint256 out, uint256 pooled) = feeder.feed(1);
+        (uint256 out, uint256 pooled) = feeder.feed(type(uint256).max, 1);
         assertEq(pooled, out + 1000e6);
         assertEq(nft.claimable(7), nft.claimable(1)); // mallory's token gets one share in ten, like everyone
         assertApproxEqAbs(nft.claimable(7) * 10, pooled, 10);
@@ -171,12 +171,12 @@ contract FeederForkTest is Test {
     function test_NoHoldersYet_MoneyWaits() public live {
         vm.deal(address(feeder), 0.01 ether);
         vm.prank(keeper);
-        (uint256 out, uint256 pooled) = feeder.feed(0);
+        (uint256 out, uint256 pooled) = feeder.feed(type(uint256).max, 0);
         assertEq(pooled, 0);
         assertEq(IERC20View(USDG).balanceOf(address(feeder)), out);
         _mint(alice, 1);
         vm.prank(keeper);
-        (, pooled) = feeder.feed(0);
+        (, pooled) = feeder.feed(type(uint256).max, 0);
         assertEq(pooled, out);
     }
 
@@ -229,7 +229,7 @@ contract FeederForkTest is Test {
         vm.deal(address(treasuryFeeder), 0.001 ether); // ETH sent here goes along
         uint256 before = TREASURY.balance;
         vm.prank(keeper);
-        (uint256 usdgIn, uint256 ethOut, uint256 sent) = treasuryFeeder.swap(0.03 ether); // $100 is ~0.044 ETH
+        (uint256 usdgIn, uint256 ethOut, uint256 sent) = treasuryFeeder.swap(type(uint256).max, 0.03 ether); // $100 is ~0.044 ETH
         assertEq(usdgIn, 100e6);
         assertGt(ethOut, 0.03 ether);
         assertEq(sent, ethOut + 0.001 ether);
@@ -242,10 +242,10 @@ contract FeederForkTest is Test {
         deal(USDG, address(treasuryFeeder), 10e6);
         vm.prank(mallory);
         vm.expectRevert(KeeperOwned.NotKeeper.selector);
-        treasuryFeeder.swap(0);
+        treasuryFeeder.swap(type(uint256).max, 0);
         vm.prank(keeper);
         vm.expectRevert(); // TooLittle: $10 never buys 1 ETH
-        treasuryFeeder.swap(1 ether);
+        treasuryFeeder.swap(type(uint256).max, 1 ether);
         vm.prank(keeper);
         vm.expectRevert(TreasuryFeeder.NotSweepable.selector);
         treasuryFeeder.sweep(USDG);
@@ -257,7 +257,7 @@ contract FeederForkTest is Test {
         deal(USDG, address(treasuryFeeder), 0);
         vm.deal(address(treasuryFeeder), 1 wei);
         vm.prank(keeper);
-        (uint256 usdgIn,, uint256 sent) = treasuryFeeder.swap(0);
+        (uint256 usdgIn,, uint256 sent) = treasuryFeeder.swap(type(uint256).max, 0);
         assertEq(usdgIn, 0);
         assertEq(sent, 1);
         // The owner replaces the keeper.
@@ -265,7 +265,7 @@ contract FeederForkTest is Test {
         treasuryFeeder.setKeeper(alice);
         vm.prank(keeper);
         vm.expectRevert(KeeperOwned.NotKeeper.selector);
-        treasuryFeeder.swap(0);
+        treasuryFeeder.swap(type(uint256).max, 0);
         vm.expectRevert(EthPoolSwap.OnlyPoolManager.selector);
         treasuryFeeder.unlockCallback(abi.encode(false, uint256(1)));
     }
@@ -285,7 +285,7 @@ contract FeederForkTest is Test {
         vm.deal(address(feeder), 5 ether);
         vm.prank(keeper);
         vm.expectPartialRevert(RewardFeeder.BelowFloor.selector);
-        feeder.feed(0);
+        feeder.feed(type(uint256).max, 0);
         assertEq(address(feeder).balance, 5 ether);
     }
 
@@ -294,7 +294,7 @@ contract FeederForkTest is Test {
         _mint(alice, 1);
         vm.deal(address(feeder), 0.5 ether);
         vm.prank(keeper);
-        (uint256 out,) = feeder.feed(0);
+        (uint256 out,) = feeder.feed(type(uint256).max, 0);
         assertGe(out * 1e18, 0.5 ether * feeder.minUsdgPerEth());
     }
 
@@ -308,7 +308,7 @@ contract FeederForkTest is Test {
         deal(USDG, address(treasuryFeeder), 10_000e6);
         vm.prank(keeper);
         vm.expectPartialRevert(TreasuryFeeder.AboveCeiling.selector);
-        treasuryFeeder.swap(0);
+        treasuryFeeder.swap(type(uint256).max, 0);
     }
 
     /// Swarm audit 2026-11-13 (finding 3): 1 wei sent to RewardFeeder used to swap for 0 USDG, fail the floor and
@@ -319,7 +319,7 @@ contract FeederForkTest is Test {
         deal(USDG, address(feeder), 1000e6);
         vm.deal(address(feeder), 1);
         vm.prank(keeper);
-        (uint256 out, uint256 pooled) = feeder.feed(0);
+        (uint256 out, uint256 pooled) = feeder.feed(type(uint256).max, 0);
         assertEq(out, 0);
         assertEq(pooled, 1000e6);
         assertEq(address(feeder).balance, 1); // waits for the next royalty
@@ -328,7 +328,7 @@ contract FeederForkTest is Test {
         deal(USDG, address(treasuryFeeder), 1);
         uint256 before = TREASURY.balance;
         vm.prank(keeper);
-        (uint256 usdgIn,, uint256 sent) = treasuryFeeder.swap(0);
+        (uint256 usdgIn,, uint256 sent) = treasuryFeeder.swap(type(uint256).max, 0);
         assertEq(usdgIn, 0);
         assertEq(sent, 1 ether);
         assertEq(TREASURY.balance - before, 1 ether);
@@ -337,11 +337,11 @@ contract FeederForkTest is Test {
         // Just above the threshold the swap runs and clears the band.
         vm.deal(address(feeder), 1e4 * 1e18 / feeder.minUsdgPerEth() + 1);
         vm.prank(keeper);
-        (out,) = feeder.feed(0);
+        (out,) = feeder.feed(type(uint256).max, 0);
         assertGt(out, 0);
         deal(USDG, address(treasuryFeeder), treasuryFeeder.MIN_SWAP_IN());
         vm.prank(keeper);
-        (usdgIn,,) = treasuryFeeder.swap(0);
+        (usdgIn,,) = treasuryFeeder.swap(type(uint256).max, 0);
         assertEq(usdgIn, treasuryFeeder.MIN_SWAP_IN());
     }
 
@@ -370,6 +370,6 @@ contract FeederForkTest is Test {
         vm.deal(address(feeder), 0.1 ether);
         vm.prank(keeper);
         vm.expectPartialRevert(RewardFeeder.BelowFloor.selector);
-        feeder.feed(0);
+        feeder.feed(type(uint256).max, 0);
     }
 }

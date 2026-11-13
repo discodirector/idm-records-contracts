@@ -9,6 +9,7 @@ import {IHooks} from "v4-core/src/interfaces/IHooks.sol";
 import {IDMRecords, IERC20Like, IBalanceOf, ICreatorToken} from "../src/IDMRecords.sol";
 import {RewardFeeder, IRecordsPot} from "../src/RewardFeeder.sol";
 import {RevenueSplitter} from "../src/RevenueSplitter.sol";
+import {TreasuryFeeder} from "../src/TreasuryFeeder.sol";
 import {LabelDeployBase, IERC20Meta} from "./LabelDeployBase.s.sol";
 
 /// @notice Limit Break Creator Token Transfer Validator v5 (src/DataTypes.sol, src/CreatorTokenTransferValidator.sol;
@@ -45,9 +46,14 @@ interface IPulseTreasuryView {
 ///              no royalty yet)
 ///           2. RewardFeeder(PoolManager, records, owner = RECORDS_OWNER, keeper = PAYOUT_KEEPER, sweep to infra,
 ///              ETH/USDG 0.05% pool)
-///           3. RevenueSplitter (royalty receiver): 50% RewardFeeder, 25% PulseTreasury (ETH only), 25% infra;
-///              WETH unwrapped; the treasury's share of any other token goes to infra
-///           4. IDMRecords.setRoyalty(splitter, 5%)
+///           3. TreasuryFeeder(PoolManager, USDG, PulseTreasury, owner = RECORDS_OWNER, keeper = PAYOUT_KEEPER, sweep
+///              to infra): swaps USDG to ETH for PulseTreasury. Also the Stations splitter's $IDM payee on Robinhood
+///              (DeployStationsSplit takes this one, it does not deploy its own).
+///           4. RevenueSplitter (royalty receiver): 50% RewardFeeder, 25% TreasuryFeeder ($IDM buy and burn), 25% infra;
+///              WETH unwrapped. The TreasuryFeeder sends ETH on to PulseTreasury and swaps USDG to ETH first, so
+///              royalties paid in USDG are burned too (swarm audit 2026-11-13, owner decision 2026-11-14; before,
+///              PulseTreasury was the ETH-only payee and its share of token royalties went to infra)
+///           4a. IDMRecords.setRoyalty(splitter, 5%)
 ///           5. IDMRecords.setTransferValidator(RECORDS_VALIDATOR) (ERC721-C royalty enforcement; default Limit Break's
 ///              Creator Token Transfer Validator v5, which is on Robinhood Chain; RECORDS_VALIDATOR=0x0 skips it)
 ///           5a. On v5 (owner decision 2026-11-04): validator.setRulesetOfCollection(records, 0, 0x0, 0, 6), so contract
@@ -64,7 +70,8 @@ interface IPulseTreasuryView {
 ///      RECORDS_OWNER (default DEPLOYER), RECORDS_BASE_URI (default https://theidm.fun/records/), RECORDS_VALIDATOR
 ///      (default DEFAULT_VALIDATOR; the zero address = no validator), RECORDS_VALIDATOR_CODEHASH (default
 ///      V5_CODEHASH for the default validator; a custom validator is not pinned unless set).
-///      verify() optional: RECORDS_CONTRACT + PAYOUT_FEEDER + PAYOUT_SPLITTER (all three) instead of the broadcast file.
+///      verify() optional: RECORDS_CONTRACT + PAYOUT_FEEDER + TREASURY_FEEDER + PAYOUT_SPLITTER (all four) instead of
+///      the broadcast file.
 contract DeployRecords is LabelDeployBase {
     string public constant NAME = "IDM Records";
     string public constant SYMBOL = "RECORDS";
@@ -100,7 +107,7 @@ contract DeployRecords is LabelDeployBase {
         address signer;
         /// @dev RewardFeeder.keeper: the payout bot's key. The owner can replace it (setKeeper) and moves its price floor (setFloor).
         address keeper;
-        /// @dev 25% of royalties, and the token sink for the treasury's share of non-ETH tokens.
+        /// @dev 25% of royalties; also where the feeders sweep tokens other than USDG.
         address infra;
         /// @dev ERC721-C transfer validator (default DEFAULT_VALIDATOR); zero = royalties are not enforced on transfers.
         address validator;
@@ -116,6 +123,7 @@ contract DeployRecords is LabelDeployBase {
     struct Deployment {
         IDMRecords records;
         RewardFeeder feeder;
+        TreasuryFeeder treasuryFeeder;
         RevenueSplitter splitter;
     }
 
@@ -127,8 +135,9 @@ contract DeployRecords is LabelDeployBase {
         d = deploy(c);
         check(c, d);
         summary(c, d, "local run (nothing is sent without --broadcast)");
-        Created[3] memory none;
-        (none[0].addr, none[1].addr, none[2].addr) = (address(d.records), address(d.feeder), address(d.splitter));
+        Created[4] memory none;
+        (none[0].addr, none[1].addr, none[2].addr, none[3].addr) =
+            (address(d.records), address(d.feeder), address(d.treasuryFeeder), address(d.splitter));
         writeRecord(c, d, none, "simulated", _recordPath(PREVIEW_RECORD));
     }
 
@@ -136,8 +145,13 @@ contract DeployRecords is LabelDeployBase {
     function verify() external returns (Deployment memory d) {
         Config memory c = loadConfig();
         _chain(ROBINHOOD_CHAIN_ID, "Robinhood Chain");
-        Created[3] memory x = loadDeployment();
-        d = Deployment(IDMRecords(x[0].addr), RewardFeeder(payable(x[1].addr)), RevenueSplitter(payable(x[2].addr)));
+        Created[4] memory x = loadDeployment();
+        d = Deployment(
+            IDMRecords(x[0].addr),
+            RewardFeeder(payable(x[1].addr)),
+            TreasuryFeeder(payable(x[2].addr)),
+            RevenueSplitter(payable(x[3].addr))
+        );
         check(c, d);
         summary(c, d, "VERIFIED on chain");
         writeRecord(c, d, x, "verified", _recordPath(RECORD));
@@ -226,8 +240,17 @@ contract DeployRecords is LabelDeployBase {
 
     // ---------------------------------------------------------------- deploy
 
-    function royaltySplit(address feeder, address infra) public pure returns (Split memory) {
-        return Split({holders: feeder, burn: TREASURY, infra: infra, burnEthOnly: true, weth: RH_WETH, tokenSink: infra});
+    /// @dev The burn quarter goes to the TreasuryFeeder in any currency: ETH on to PulseTreasury, USDG swapped to ETH
+    ///      first, any other token swept to infra. No ETH-only payee, so the token sink is never used.
+    function royaltySplit(address feeder, address treasuryFeeder, address infra) public pure returns (Split memory) {
+        return Split({
+            holders: feeder,
+            burn: treasuryFeeder,
+            infra: infra,
+            burnEthOnly: false,
+            weth: RH_WETH,
+            tokenSink: infra
+        });
     }
 
     function deploy(Config memory c) public returns (Deployment memory d) {
@@ -245,7 +268,10 @@ contract DeployRecords is LabelDeployBase {
             TICK_SPACING,
             _feedFloor(price)
         );
-        d.splitter = _deploySplit(royaltySplit(address(d.feeder), c.infra));
+        d.treasuryFeeder = new TreasuryFeeder(
+            IPoolManager(POOL_MANAGER), USDG, TREASURY, c.owner, c.keeper, c.infra, POOL_FEE, TICK_SPACING, _feedCeiling(price)
+        );
+        d.splitter = _deploySplit(royaltySplit(address(d.feeder), address(d.treasuryFeeder), c.infra));
         d.records.setRoyalty(address(d.splitter), ROYALTY_BPS);
         if (c.validator != address(0)) d.records.setTransferValidator(c.validator);
         if (c.mintableUpTo != 0) d.records.setMintableUpTo(c.mintableUpTo);
@@ -296,7 +322,7 @@ contract DeployRecords is LabelDeployBase {
 
     // ---------------------------------------------------------------- read back
 
-    /// @notice Reads every setting of the three contracts back; reverts on the first one that differs from `c`.
+    /// @notice Reads every setting of the four contracts back; reverts on the first one that differs from `c`.
     function check(Config memory c, Deployment memory d) public view {
         IDMRecords n = d.records;
         RewardFeeder f = d.feeder;
@@ -371,7 +397,8 @@ contract DeployRecords is LabelDeployBase {
         _checkPool();
         _checkBand(f.minUsdgPerEth(), true, "RewardFeeder");
 
-        _checkSplit(d.splitter, royaltySplit(address(f), c.infra), "royalty splitter");
+        _checkTreasuryFeeder(d.treasuryFeeder, c.owner, c.keeper, c.infra);
+        _checkSplit(d.splitter, royaltySplit(address(f), address(d.treasuryFeeder), c.infra), "royalty splitter");
     }
 
     /// @dev The feeder's ETH/USDG pool exists, has liquidity, and prices ETH sanely.
@@ -381,28 +408,30 @@ contract DeployRecords is LabelDeployBase {
 
     // ---------------------------------------------------------------- deployment evidence
 
-    /// @notice The three addresses (and their tx/block when known): env, or Forge's broadcast file of run().
-    function loadDeployment() public view returns (Created[3] memory x) {
+    /// @notice The four addresses (and their tx/block when known): env, or Forge's broadcast file of run().
+    function loadDeployment() public view returns (Created[4] memory x) {
         address r = vm.envOr("RECORDS_CONTRACT", address(0));
         address f = vm.envOr("PAYOUT_FEEDER", address(0));
+        address t = vm.envOr("TREASURY_FEEDER", address(0));
         address s = vm.envOr("PAYOUT_SPLITTER", address(0));
-        if (r != address(0) || f != address(0) || s != address(0)) {
+        if (r != address(0) || f != address(0) || t != address(0) || s != address(0)) {
             require(
-                r != address(0) && f != address(0) && s != address(0),
-                "set all of RECORDS_CONTRACT, PAYOUT_FEEDER, PAYOUT_SPLITTER, or none"
+                r != address(0) && f != address(0) && t != address(0) && s != address(0),
+                "set all of RECORDS_CONTRACT, PAYOUT_FEEDER, TREASURY_FEEDER, PAYOUT_SPLITTER, or none"
             );
-            (x[0].addr, x[1].addr, x[2].addr) = (r, f, s);
+            (x[0].addr, x[1].addr, x[2].addr, x[3].addr) = (r, f, t, s);
             return x;
         }
         return fromBroadcast(_broadcastFile(SCRIPT_FILE));
     }
 
-    function fromBroadcast(string memory path) public view returns (Created[3] memory x) {
+    function fromBroadcast(string memory path) public view returns (Created[4] memory x) {
         require(vm.exists(path), string.concat("no broadcast file at ", path, "; set the addresses by env instead"));
         string memory json = vm.readFile(path);
         x[0] = _created(json, "IDMRecords", 0);
         x[1] = _created(json, "RewardFeeder", 0);
-        x[2] = _created(json, "RevenueSplitter", 0);
+        x[2] = _created(json, "TreasuryFeeder", 0);
+        x[3] = _created(json, "RevenueSplitter", 0);
     }
 
     // ---------------------------------------------------------------- output
@@ -439,7 +468,17 @@ contract DeployRecords is LabelDeployBase {
         console2.log("    pool tick spacing             ", int256(d.feeder.tickSpacing()));
         console2.log("    pool price USDG/ETH (6 dec)   ", price);
         console2.log("    pool liquidity                ", uint256(liquidity));
-        _logSplit(d.splitter, royaltySplit(address(d.feeder), c.infra), "RewardFeeder (NFT holders)", "PulseTreasury ($IDM burn)");
+        console2.log("  TreasuryFeeder (no withdrawal)  ", address(d.treasuryFeeder));
+        console2.log("    USDG -> ETH -> PulseTreasury  ", TREASURY);
+        console2.log("    owner (replaces the keeper)   ", d.treasuryFeeder.owner());
+        console2.log("    keeper (swaps)                ", d.treasuryFeeder.keeper());
+        console2.log("    ceiling USDG/ETH (owner sets) ", d.treasuryFeeder.maxUsdgPerEth());
+        _logSplit(
+            d.splitter,
+            royaltySplit(address(d.feeder), address(d.treasuryFeeder), c.infra),
+            "RewardFeeder (NFT holders)",
+            "TreasuryFeeder ($IDM burn)"
+        );
         if (c.infra.code.length > 0) {
             console2.log("    !! infra is a contract: it must accept plain ETH or every release() reverts");
         }
@@ -448,14 +487,15 @@ contract DeployRecords is LabelDeployBase {
         }
     }
 
-    function writeRecord(Config memory c, Deployment memory d, Created[3] memory x, string memory status, string memory path)
+    function writeRecord(Config memory c, Deployment memory d, Created[4] memory x, string memory status, string memory path)
         public
     {
         string memory k = "records";
         _recordHead(k, "robinhood", status);
         _recordCreated(k, "records", x[0]);
         _recordCreated(k, "rewardFeeder", x[1]);
-        _recordCreated(k, "royaltySplitter", x[2]);
+        _recordCreated(k, "treasuryFeeder", x[2]);
+        _recordCreated(k, "royaltySplitter", x[3]);
         vm.serializeAddress(k, "deployer", c.deployer);
         vm.serializeAddress(k, "owner", d.records.owner());
         vm.serializeAddress(k, "pendingOwner", d.records.pendingOwner());
@@ -476,7 +516,7 @@ contract DeployRecords is LabelDeployBase {
         vm.serializeString(k, "baseURI", d.records.baseURI());
         vm.serializeUint(k, "maxSupply", 1000);
         string memory json = vm.serializeString(
-            k, "royaltyShares", "5000 RewardFeeder / 2500 PulseTreasury (ETH only; its token share to infra) / 2500 infra"
+            k, "royaltyShares", "5000 RewardFeeder / 2500 TreasuryFeeder (-> PulseTreasury, USDG swapped to ETH) / 2500 infra"
         );
         vm.writeJson(json, path);
         console2.log("  record written:", path);

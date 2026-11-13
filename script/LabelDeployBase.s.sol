@@ -10,6 +10,7 @@ import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {Currency} from "v4-core/src/types/Currency.sol";
 import {RevenueSplitter} from "../src/RevenueSplitter.sol";
+import {TreasuryFeeder} from "../src/TreasuryFeeder.sol";
 
 interface IERC20Meta {
     function decimals() external view returns (uint8);
@@ -106,6 +107,20 @@ abstract contract LabelDeployBase is Script {
         } else {
             require(floorOrCeiling > price && floorOrCeiling <= price * 3 / 2, string.concat(what, ": ceiling not 0-50% over the pool price"));
         }
+    }
+
+    /// @dev The one TreasuryFeeder on Robinhood (DeployRecords creates it; the Stations splitter pays it too).
+    function _checkTreasuryFeeder(TreasuryFeeder t, address owner_, address keeper_, address infra) internal view {
+        _hasCode(address(t), "TreasuryFeeder");
+        _checkCode(address(t), "TreasuryFeeder");
+        require(t.usdg() == USDG, "TreasuryFeeder mismatch: usdg");
+        require(t.treasury() == TREASURY, "TreasuryFeeder mismatch: treasury");
+        require(t.owner() == owner_, "TreasuryFeeder mismatch: owner");
+        require(t.keeper() == keeper_, "TreasuryFeeder mismatch: keeper");
+        require(t.sweepTo() == infra, "TreasuryFeeder mismatch: sweepTo");
+        require(address(t.poolManager()) == POOL_MANAGER, "TreasuryFeeder mismatch: PoolManager");
+        require(t.fee() == RH_POOL_FEE && t.tickSpacing() == RH_TICK_SPACING, "TreasuryFeeder mismatch: pool fee / tick spacing");
+        _checkBand(t.maxUsdgPerEth(), false, "TreasuryFeeder");
     }
 
     // ---------------------------------------------------------------- code checks

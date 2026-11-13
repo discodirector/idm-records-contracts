@@ -24,8 +24,8 @@ interface IRewardFeederView {
 ///           1/4 IDM Records holders: Base -> HolderRewards (its shared pool); Robinhood -> RewardFeeder (the pot's
 ///               shared pool at its next feed)
 ///           1/4 $IDM buy and burn: Base -> the bridge keeper's burn wallet (bridged to Robinhood as ETH for
-///               PulseTreasury); Robinhood -> a TreasuryFeeder this script deploys first (USDG -> ETH -> PulseTreasury,
-///               keeper = the payout keeper, owner = STATIONS_OWNER)
+///               PulseTreasury); Robinhood -> the TreasuryFeeder DeployRecords created (USDG -> ETH -> PulseTreasury;
+///               it is also the royalty splitter's token sink, so one feeder and one keeper serve both)
 ///           1/4 IMD buy and burn: STATIONS_IMD_BURN
 ///           1/4 infra: LABEL_INFRA
 ///         Anyone may release (`releaseToken(stable)`); the rewards keeper (Base) and the payout keeper (Robinhood) do
@@ -33,9 +33,10 @@ interface IRewardFeederView {
 ///         deployed that chain's holders contract was verified: the holders payee must be the one in its record
 ///         (deployments/label-base.json, deployments/records-robinhood.json).
 /// @dev Env: DEPLOYER, STATIONS_IMD_BURN, LABEL_INFRA; Base: HOLDER_REWARDS, BRIDGE_BURN; Robinhood: PAYOUT_FEEDER,
-///      PAYOUT_KEEPER, optional STATIONS_OWNER (default RECORDS_OWNER, then DEPLOYER), RECORDS_CONTRACT (default: from
-///      the records record). STATIONS_LABEL_RECORD / STATIONS_RECORDS_RECORD override the record paths. verify()
-///      optional: STATIONS_SPLITTER (and on Robinhood TREASURY_FEEDER) instead of the broadcast file.
+///      PAYOUT_KEEPER, optional RECORDS_OWNER (the feeders' owner; default DEPLOYER), RECORDS_CONTRACT and
+///      TREASURY_FEEDER (default: from the records record, which they must match). STATIONS_LABEL_RECORD /
+///      STATIONS_RECORDS_RECORD override the record paths. verify() optional: STATIONS_SPLITTER instead of the
+///      broadcast file.
 contract DeployStationsSplit is LabelDeployBase {
     uint16 public constant QUARTER = 2500;
     string public constant SCRIPT_FILE = "DeployStationsSplit.s.sol";
@@ -46,22 +47,25 @@ contract DeployStationsSplit is LabelDeployBase {
         address deployer;
         /// @dev HolderRewards (Base) or RewardFeeder (Robinhood).
         address holders;
-        /// @dev Base: the burn bridge wallet. Robinhood: unused (the TreasuryFeeder is deployed here).
+        /// @dev Base: the burn bridge wallet. Robinhood: unused (the $IDM payee is the TreasuryFeeder).
         address idmBurn;
         address imdBurn;
         address infra;
         /// @dev The holders contract and (Base) burn wallet named by the earlier step's verified record.
         address recordHolders;
         address recordBurn;
-        /// @dev Robinhood: IDM Records (the feeder must feed it), TreasuryFeeder owner and keeper.
+        /// @dev Robinhood: IDM Records (the feeder must feed it), the feeders' owner and keeper, the TreasuryFeeder
+        ///      (and the one in the verified records record).
         address records;
         address owner;
         address keeper;
+        address treasuryFeeder;
+        address recordTreasuryFeeder;
     }
 
     struct Deployment {
         RevenueSplitter splitter;
-        /// @dev Robinhood only (zero on Base).
+        /// @dev Robinhood only (zero on Base): not deployed here, DeployRecords' one.
         TreasuryFeeder treasuryFeeder;
     }
 
@@ -80,7 +84,8 @@ contract DeployStationsSplit is LabelDeployBase {
     function verify() external returns (Deployment memory d) {
         Config memory c = loadConfig();
         Created[2] memory x = loadDeployment();
-        d = Deployment(RevenueSplitter(payable(x[0].addr)), TreasuryFeeder(payable(x[1].addr)));
+        x[1].addr = c.treasuryFeeder;
+        d = Deployment(RevenueSplitter(payable(x[0].addr)), TreasuryFeeder(payable(c.treasuryFeeder)));
         check(c, d);
         summary(c, d, "VERIFIED on chain");
         writeRecord(c, x, "verified", _recordPath(recordFile(false)));
@@ -116,13 +121,19 @@ contract DeployStationsSplit is LabelDeployBase {
         } else {
             require(
                 vm.envOr("STATIONS_IDM_BURN", address(0)) == address(0),
-                "STATIONS_IDM_BURN: not used any more; on Robinhood the $IDM quarter goes to the TreasuryFeeder this script deploys"
+                "STATIONS_IDM_BURN: not used any more; on Robinhood the $IDM quarter goes to DeployRecords' TreasuryFeeder"
             );
             c.holders = vm.envAddress("PAYOUT_FEEDER");
             c.recordHolders = _fromRecord("STATIONS_RECORDS_RECORD", RECORDS_RECORD, "rewardFeeder");
             c.records = vm.envOr("RECORDS_CONTRACT", _fromRecord("STATIONS_RECORDS_RECORD", RECORDS_RECORD, "records"));
-            c.owner = vm.envOr("STATIONS_OWNER", vm.envOr("RECORDS_OWNER", c.deployer));
+            require(
+                vm.envOr("STATIONS_OWNER", address(0)) == address(0),
+                "STATIONS_OWNER: not used any more; the TreasuryFeeder's owner is RECORDS_OWNER (DeployRecords)"
+            );
+            c.owner = vm.envOr("RECORDS_OWNER", c.deployer);
             c.keeper = vm.envAddress("PAYOUT_KEEPER");
+            c.recordTreasuryFeeder = _fromRecord("STATIONS_RECORDS_RECORD", RECORDS_RECORD, "treasuryFeeder");
+            c.treasuryFeeder = vm.envOr("TREASURY_FEEDER", c.recordTreasuryFeeder);
         }
     }
 
@@ -153,7 +164,13 @@ contract DeployStationsSplit is LabelDeployBase {
             _distinctPayees([c.holders, c.idmBurn, c.imdBurn, c.infra]);
         } else {
             _nonzero(c.records, "RECORDS_CONTRACT");
-            _nonzero(c.owner, "STATIONS_OWNER");
+            _nonzero(c.owner, "RECORDS_OWNER");
+            _nonzero(c.treasuryFeeder, "TREASURY_FEEDER");
+            require(
+                c.recordTreasuryFeeder != address(0),
+                "TREASURY_FEEDER: no verified record of it (run DeployRecords verify() first)"
+            );
+            require(c.treasuryFeeder == c.recordTreasuryFeeder, "TREASURY_FEEDER: not the one in the verified deployment record");
             _nonzero(c.keeper, "PAYOUT_KEEPER");
             _checkCode(c.holders, "RewardFeeder");
             IRewardFeederView f = IRewardFeederView(c.holders);
@@ -162,16 +179,12 @@ contract DeployStationsSplit is LabelDeployBase {
             require(f.keeper() != address(0), "PAYOUT_FEEDER: no keeper");
             require(c.keeper == f.keeper(), "PAYOUT_KEEPER: not the RewardFeeder's keeper (one payout bot runs both feeders)");
             _isEoa(c.keeper, "PAYOUT_KEEPER");
-            _distinct(c.keeper, c.owner, "PAYOUT_KEEPER and STATIONS_OWNER");
+            _distinct(c.keeper, c.owner, "PAYOUT_KEEPER and RECORDS_OWNER");
             _distinct(c.imdBurn, c.keeper, "STATIONS_IMD_BURN and PAYOUT_KEEPER");
             _hasCode(TREASURY, "PulseTreasury");
             _hasCode(POOL_MANAGER, "PoolManager");
-            _checkEthUsdgPool();
-            // The TreasuryFeeder is new, so only the other three can clash.
-            require(
-                c.holders != c.imdBurn && c.holders != c.infra && c.imdBurn != c.infra,
-                "stations payees: must be four different addresses"
-            );
+            _checkTreasuryFeeder(TreasuryFeeder(payable(c.treasuryFeeder)), c.owner, c.keeper, c.infra);
+            _distinctPayees([c.holders, c.treasuryFeeder, c.imdBurn, c.infra]);
         }
     }
 
@@ -196,20 +209,7 @@ contract DeployStationsSplit is LabelDeployBase {
     function deploy(Config memory c) public returns (Deployment memory d) {
         bool base = onBase();
         vm.startBroadcast(c.deployer);
-        if (!base) {
-            (uint256 price,) = _checkEthUsdgPool();
-            d.treasuryFeeder = new TreasuryFeeder(
-                IPoolManager(POOL_MANAGER),
-                USDG,
-                TREASURY,
-                c.owner,
-                c.keeper,
-                c.infra,
-                RH_POOL_FEE,
-                RH_TICK_SPACING,
-                _feedCeiling(price)
-            );
-        }
+        if (!base) d.treasuryFeeder = TreasuryFeeder(payable(c.treasuryFeeder));
         (address[] memory a, uint16[] memory b, bool[] memory e) =
             payees(c, base ? c.idmBurn : address(d.treasuryFeeder));
         d.splitter = new RevenueSplitter(a, b, e, address(0), c.infra);
@@ -238,35 +238,17 @@ contract DeployStationsSplit is LabelDeployBase {
             require(address(d.treasuryFeeder) == address(0), "StationsSplitter mismatch: no TreasuryFeeder on Base");
             return;
         }
-        TreasuryFeeder t = d.treasuryFeeder;
-        _hasCode(address(t), "TreasuryFeeder");
-        _checkCode(address(t), "TreasuryFeeder");
-        require(t.usdg() == USDG, "TreasuryFeeder mismatch: usdg");
-        require(t.treasury() == TREASURY, "TreasuryFeeder mismatch: treasury");
-        require(t.owner() == c.owner, "TreasuryFeeder mismatch: owner");
-        require(t.keeper() == c.keeper, "TreasuryFeeder mismatch: keeper");
-        require(t.sweepTo() == c.infra, "TreasuryFeeder mismatch: sweepTo");
-        require(address(t.poolManager()) == POOL_MANAGER, "TreasuryFeeder mismatch: PoolManager");
-        require(t.fee() == RH_POOL_FEE && t.tickSpacing() == RH_TICK_SPACING, "TreasuryFeeder mismatch: pool fee / tick spacing");
-        _checkBand(t.maxUsdgPerEth(), false, "TreasuryFeeder");
+        require(address(d.treasuryFeeder) == c.treasuryFeeder, "StationsSplitter mismatch: TreasuryFeeder");
+        _checkTreasuryFeeder(d.treasuryFeeder, c.owner, c.keeper, c.infra);
     }
 
-    /// @notice [splitter, TreasuryFeeder (Robinhood; zero on Base)]: env, or Forge's broadcast file of run().
+    /// @notice [splitter, (unused here: the TreasuryFeeder comes from the config)]: env, or Forge's broadcast file of run().
     function loadDeployment() public view returns (Created[2] memory x) {
-        bool base = onBase();
         x[0].addr = vm.envOr("STATIONS_SPLITTER", address(0));
-        if (x[0].addr != address(0)) {
-            if (!base) {
-                x[1].addr = vm.envOr("TREASURY_FEEDER", address(0));
-                require(x[1].addr != address(0), "set TREASURY_FEEDER with STATIONS_SPLITTER on Robinhood");
-            }
-            return x;
-        }
+        if (x[0].addr != address(0)) return x;
         string memory path = _broadcastFile(SCRIPT_FILE);
         require(vm.exists(path), string.concat("no broadcast file at ", path, "; set STATIONS_SPLITTER instead"));
-        string memory json = vm.readFile(path);
-        x[0] = _created(json, "RevenueSplitter", 0);
-        if (!base) x[1] = _created(json, "TreasuryFeeder", 0);
+        x[0] = _created(vm.readFile(path), "RevenueSplitter", 0);
     }
 
     function summary(Config memory c, Deployment memory d, string memory status) public view {
@@ -277,7 +259,7 @@ contract DeployStationsSplit is LabelDeployBase {
         if (base) {
             console2.log("    1/4 $IDM: burn bridge wallet  ", c.idmBurn);
         } else {
-            console2.log("    1/4 $IDM: TreasuryFeeder      ", address(d.treasuryFeeder));
+            console2.log("    1/4 $IDM: TreasuryFeeder (from DeployRecords)", address(d.treasuryFeeder));
             console2.log("      USDG -> ETH -> PulseTreasury", TREASURY);
             console2.log("      owner (replaces the keeper) ", c.owner);
             console2.log("      keeper (swaps)              ", c.keeper);
@@ -294,7 +276,7 @@ contract DeployStationsSplit is LabelDeployBase {
         _recordHead(k, network(), status);
         _recordCreated(k, "stationsSplitter", x[0]);
         if (!onBase()) {
-            _recordCreated(k, "treasuryFeeder", x[1]);
+            vm.serializeAddress(k, "treasuryFeeder", x[1].addr);
             vm.serializeAddress(k, "treasuryFeederOwner", c.owner);
             vm.serializeAddress(k, "keeper", c.keeper);
             vm.serializeAddress(k, "records", c.records);

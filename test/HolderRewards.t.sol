@@ -17,6 +17,10 @@ contract MockUsdc {
         frozen[a] = true;
     }
 
+    function unfreeze(address a) external {
+        frozen[a] = false;
+    }
+
     function transfer(address to, uint256 a) external returns (bool) {
         require(!frozen[to], "frozen");
         balanceOf[msg.sender] -= a;
@@ -58,6 +62,9 @@ library MerkleTestLib {
         }
     }
 }
+
+/// @dev A contract account on Base with no way to move USDC.
+contract Escrow {}
 
 abstract contract RewardsFixture is Test {
     MockUsdc usdc;
@@ -284,9 +291,11 @@ contract HolderRewardsTest is RewardsFixture {
         rewards.proposeRoot(1, r, 12e6, bytes32(0));
         vm.warp(block.timestamp + DELAY);
         assertEq(_claim(alice, 0), 10e6);
-        vm.expectRevert(HolderRewards.OverTotal.selector);
-        _claim(bob, 1);
-        assertEq(rewards.totalClaimed(), 10e6);
+        // Bob gets what the total still covers; the rest stays owed to token 2.
+        assertEq(_claim(bob, 1), 2e6);
+        assertEq(rewards.claimed(2), 2e6);
+        assertEq(rewards.totalClaimed(), 12e6);
+        assertEq(_claim(bob, 1), 0);
     }
 
     function test_TotalsNeverShrink() public {
@@ -467,11 +476,11 @@ contract HolderRewardsTest is RewardsFixture {
         assertEq(rewards.received(), 7e6); // only USDC counts, and it stays
     }
 
-    /// Review PoC (MEDIUM): a root that lowers one token's cumulative and raises another's (same sum) leaves the second
-    /// holder unable to claim. The contract cannot see per-token history, so the keeper refuses such a root before
-    /// posting (bot/src/rewards/epoch.ts checkLeaves, test "refuses a root that lowers a token"); the contract still
-    /// never pays out more than the root's total.
-    function test_Poc_PerTokenDecreaseCannotOverdraw() public {
+    /// Review PoC (MEDIUM), then swarm audit 2026-11-13 (low): a root that lowers one token's cumulative under what it
+    /// already took and raises another's (same sum) cannot cover every leaf. The keeper refuses such a root before
+    /// posting (bot/src/rewards/epoch.ts checkLeaves); if one lands anyway, the other holder is paid what the total
+    /// still covers (it used to be locked out entirely) and the rest stays owed until a corrected root.
+    function test_Poc_PerTokenDecreasePaysWhatTheTotalCovers() public {
         usdc.mint(address(rewards), 100);
         bytes32 a1 = rewards.leaf(1, alice, true, 60);
         bytes32 b1 = rewards.leaf(2, bob, true, 40);
@@ -487,9 +496,66 @@ contract HolderRewardsTest is RewardsFixture {
         rewards.proposeRoot(2, MerkleTestLib.hashPair(a2, b2), 100, 0);
         vm.warp(block.timestamp + DELAY);
         p[0] = a2;
-        vm.expectRevert(HolderRewards.OverTotal.selector);
-        rewards.claim(2, bob, true, 80, p);
-        assertEq(rewards.totalClaimed(), 60);
+        assertEq(rewards.claim(2, bob, true, 80, p), 40);
+        assertEq(rewards.totalClaimed(), 100);
+        assertEq(usdc.balanceOf(address(rewards)), 0);
+        assertEq(rewards.claim(2, bob, true, 80, p), 0); // never more than arrived
+        // 40 more arrive and a corrected root pays bob the rest.
+        usdc.mint(address(rewards), 40);
+        bytes32 a3 = rewards.leaf(1, alice, true, 60);
+        bytes32 b3 = rewards.leaf(2, bob, true, 80);
+        vm.prank(keeper);
+        rewards.proposeRoot(3, MerkleTestLib.hashPair(a3, b3), 140, 0);
+        vm.warp(block.timestamp + DELAY);
+        p[0] = a3;
+        assertEq(rewards.claim(2, bob, true, 80, p), 40);
+        assertEq(usdc.balanceOf(bob), 80);
+    }
+
+    /// Swarm audit 2026-11-13 (low): a pushable leaf whose account has code on Base (an escrow that cannot move USDC)
+    /// is not pushed by a stranger; the contract may still claim itself.
+    function test_StrangerCannotPushUsdcIntoAContractAccount() public {
+        address escrow = address(new Escrow());
+        usdc.mint(address(rewards), 100e6);
+        _set(_one(1, escrow, true, 100e6));
+        _post();
+        vm.expectRevert(HolderRewards.NotAccount.selector);
+        _claim(stranger, 0);
+        assertEq(usdc.balanceOf(escrow), 0);
+        assertEq(_claim(escrow, 0), 100e6);
+    }
+
+    /// Swarm audit 2026-11-13 (info): one leaf that cannot be paid (a frozen account, a contract account) no longer
+    /// fails the pushed batch; it is skipped with ClaimFailed and keeps its rewards.
+    function test_ClaimManySkipsALeafItCannotPay() public {
+        address escrow = address(new Escrow());
+        usdc.mint(address(rewards), 50e6);
+        usdc.freeze(alice);
+        L[] memory ls = new L[](3);
+        ls[0] = L(1, alice, true, 1e6);
+        ls[1] = L(2, escrow, true, 2e6);
+        ls[2] = L(9, bob, true, 3e6);
+        _set(ls);
+        _post();
+        bytes32[] memory h = _hashes();
+        HolderRewards.Claim[] memory cs = new HolderRewards.Claim[](3);
+        for (uint256 i; i < 3; ++i) {
+            cs[i] = HolderRewards.Claim(ls[i].tokenId, ls[i].account, ls[i].pushable, ls[i].cumulative, MerkleTestLib.proof(h, i));
+        }
+        vm.expectEmit(address(rewards));
+        emit HolderRewards.ClaimFailed(1, alice, 1e6);
+        vm.expectEmit(address(rewards));
+        emit HolderRewards.ClaimFailed(2, escrow, 2e6);
+        vm.prank(stranger);
+        assertEq(rewards.claimMany(cs), 3e6);
+        assertEq(usdc.balanceOf(bob), 3e6);
+        assertEq(rewards.claimed(1), 0);
+        assertEq(rewards.claimed(2), 0);
+        assertEq(rewards.totalClaimed(), 3e6);
+        usdc.unfreeze(alice);
+        vm.prank(stranger);
+        assertEq(rewards.claimMany(cs), 1e6);
+        assertEq(usdc.balanceOf(alice), 1e6);
     }
 
     function test_ClaimMany() public {
