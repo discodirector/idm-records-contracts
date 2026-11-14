@@ -18,7 +18,7 @@ Nothing here is deployed yet. This repository is published for review before the
 | `src/RevenueSplitter.sol` | 145 | Robinhood, Base | Ownerless push splitter for ETH and ERC-20 with fixed payees and shares; optional WETH unwrap; ETH-only payee whose tokens go to a sink. |
 | `src/HolderRewards.sol` | 336 | Base 8453 | USDC rewards for record holders, paid against keeper-posted Merkle roots with a delay, guardian revoke, pushed (plain accounts only) or pulled claims. |
 | `src/ArcForwarder.sol` | 136 | Arc 5042 | Ownerless: sends all its USDC to a fixed recipient on Base with Circle CCTP v2. |
-| `script/*.s.sol` | 1510 | | Deploy scripts with dry run, on-chain checks (`verify()`), pinned code hashes and price band checks. In scope as far as they set security-relevant parameters. |
+| `script/*.s.sol` | 1517 | | Deploy scripts with dry run, on-chain checks (`verify()`), pinned code hashes and price band checks. In scope as far as they set security-relevant parameters. |
 
 Out of scope: `lib/` (vendored upstream code, see `DEPENDENCIES.md`), the $IDM token and its hook (already live),
 the off-chain services (voucher signer, payout keeper, rewards keeper). Comments that point to `docs/...` or `bot/...`
@@ -110,6 +110,10 @@ the seller's claim window on Base.
   `RevenueSplitter` paying this RewardFeeder and TreasuryFeeder, so a stale deployment record cannot point the Stations
   splitter at an orphan TreasuryFeeder (`test_RobinhoodInputChecks`).
 - A deployment record of an earlier step is accepted only if its `chainId` is the chain being deployed to.
+- A broadcast rehearsal on a Robinhood fork found that `IDMRecords.setTransferValidator` registered nothing with
+  Limit Break v5: it does so in a try/catch, and the gas estimate picks the path where that inner call runs out of
+  gas and is caught. `DeployRecords` now calls `setTokenTypeOfCollection(records, 721)` from the deployer, and
+  `verify()` checks the token type (it caught this).
 - Off-chain (main repo): the payout keeper runs each action on its own and, when a swap reverts, sends the same call
   again without the swap (`feed(0, 0)` / `swap(0, 0)`), so pooling and the ETH send never wait on a swap.
 

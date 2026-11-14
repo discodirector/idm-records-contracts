@@ -38,14 +38,14 @@ interface IERC20View {
 }
 
 /// Stands in for the ERC721-C validator at its address, without a network: allows every transfer, and keeps each
-/// collection's v5 security policy as Limit Break's validator does (only the collection's owner may set it).
+/// collection's v5 security policy as Limit Break's validator does (the collection or its owner may set it).
 contract AllowAllValidator {
     mapping(address => CollectionSecurityPolicy) internal _policy;
 
     function validateTransfer(address, address, address, uint256) external view {}
 
     function setTokenTypeOfCollection(address collection, uint16 tokenType) external {
-        require(msg.sender == collection, "only the collection");
+        require(msg.sender == collection || msg.sender == IDMRecords(collection).owner(), "only the collection or its owner");
         _policy[collection].tokenType = tokenType;
     }
 
@@ -246,8 +246,9 @@ contract DeployRecordsTest is LabelDeployFixture {
         script.checkInputs(c);
         uint64 nonce = vm.getNonce(deployer);
         DeployRecords.Deployment memory d = script.deploy(c);
-        // Four creations, setRoyalty, setTransferValidator, setMintableUpTo, the v5 rules, transferOwnership.
-        assertEq(vm.getNonce(deployer), nonce + 9);
+        // Four creations, setRoyalty, setTransferValidator, the v5 token type, setMintableUpTo, the v5 rules,
+        // transferOwnership.
+        assertEq(vm.getNonce(deployer), nonce + 10);
         CollectionSecurityPolicy memory p = ITransferValidatorV5(LB_VALIDATOR).getCollectionSecurityPolicy(address(d.records));
         assertEq(p.rulesetOptions, 6);
         assertEq(p.rulesetId, 0);

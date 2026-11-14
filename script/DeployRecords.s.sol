@@ -33,6 +33,8 @@ interface ITransferValidatorV5 {
         uint16 rulesetOptions
     ) external;
     function getCollectionSecurityPolicy(address collection) external view returns (CollectionSecurityPolicy memory);
+    /// @dev Caller: as setRulesetOfCollection.
+    function setTokenTypeOfCollection(address collection, uint16 tokenType) external;
 }
 
 interface IPulseTreasuryView {
@@ -55,7 +57,9 @@ interface IPulseTreasuryView {
 ///              PulseTreasury was the ETH-only payee and its share of token royalties went to infra)
 ///           4a. IDMRecords.setRoyalty(splitter, 5%)
 ///           5. IDMRecords.setTransferValidator(RECORDS_VALIDATOR) (ERC721-C royalty enforcement; default Limit Break's
-///              Creator Token Transfer Validator v5, which is on Robinhood Chain; RECORDS_VALIDATOR=0x0 skips it)
+///              Creator Token Transfer Validator v5, which is on Robinhood Chain; RECORDS_VALIDATOR=0x0 skips it),
+///              then on v5 validator.setTokenTypeOfCollection(records, 721) from the deployer: the collection's own
+///              registration runs in a try/catch that a gas estimate starves (Robinhood fork rehearsal 2026-11-14)
 ///           5a. On v5 (owner decision 2026-11-04): validator.setRulesetOfCollection(records, 0, 0x0, 0, 6), so contract
 ///              wallets (a Safe) and EIP-7702 wallets may move their own records like plain wallets do, while Limit
 ///              Break's default list 0 still decides which marketplaces may move them (royalties stay enforced there).
@@ -274,6 +278,9 @@ contract DeployRecords is LabelDeployBase {
         d.splitter = _deploySplit(royaltySplit(address(d.feeder), address(d.treasuryFeeder), c.infra));
         d.records.setRoyalty(address(d.splitter), ROYALTY_BPS);
         if (c.validator != address(0)) d.records.setTransferValidator(c.validator);
+        // setTransferValidator registers the token type in a try/catch, and a gas estimate finds the cheaper path where
+        // that inner call runs out of gas and is caught (seen on a Robinhood fork, 2026-11-14): the owner sets it here.
+        if (c.validator == DEFAULT_VALIDATOR) ITransferValidatorV5(c.validator).setTokenTypeOfCollection(address(d.records), 721);
         if (c.mintableUpTo != 0) d.records.setMintableUpTo(c.mintableUpTo);
         // The deployer still owns the collection here, which is who v5 lets set its rules.
         if (c.walletOtc) _setWalletOtc(c.validator, address(d.records));
