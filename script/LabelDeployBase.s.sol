@@ -170,6 +170,7 @@ abstract contract LabelDeployBase is Script {
             keccak256(bytes(vm.parseJsonString(json, ".status"))) == keccak256("verified"),
             string.concat(path, ": not a verified record (run that step's verify() first)")
         );
+        require(vm.parseJsonUint(json, ".chainId") == block.chainid, string.concat(path, ": a record of another chain"));
         a = vm.parseJsonAddress(json, string.concat(".", key));
     }
 

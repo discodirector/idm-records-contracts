@@ -2,10 +2,13 @@
 pragma solidity ^0.8.26;
 
 import {console2} from "forge-std/Script.sol";
-import {IPoolManager} from "v4-core/src/interfaces/IPoolManager.sol";
 import {RevenueSplitter} from "../src/RevenueSplitter.sol";
 import {TreasuryFeeder} from "../src/TreasuryFeeder.sol";
 import {LabelDeployBase} from "./LabelDeployBase.s.sol";
+
+interface IRoyaltyView {
+    function royaltyInfo(uint256 tokenId, uint256 salePrice) external view returns (address, uint256);
+}
 
 interface IHolderRewardsView {
     function usdc() external view returns (address);
@@ -25,7 +28,7 @@ interface IRewardFeederView {
 ///               shared pool at its next feed)
 ///           1/4 $IDM buy and burn: Base -> the bridge keeper's burn wallet (bridged to Robinhood as ETH for
 ///               PulseTreasury); Robinhood -> the TreasuryFeeder DeployRecords created (USDG -> ETH -> PulseTreasury;
-///               it is also the royalty splitter's token sink, so one feeder and one keeper serve both)
+///               it is also the royalty splitter's $IDM payee, so one feeder and one keeper serve both)
 ///           1/4 IMD buy and burn: STATIONS_IMD_BURN
 ///           1/4 infra: LABEL_INFRA
 ///         Anyone may release (`releaseToken(stable)`); the rewards keeper (Base) and the payout keeper (Robinhood) do
@@ -184,6 +187,16 @@ contract DeployStationsSplit is LabelDeployBase {
             _hasCode(TREASURY, "PulseTreasury");
             _hasCode(POOL_MANAGER, "PoolManager");
             _checkTreasuryFeeder(TreasuryFeeder(payable(c.treasuryFeeder)), c.owner, c.keeper, c.infra);
+            // On chain, not only in the record: the royalty splitter of these IDM Records pays these two feeders, so
+            // one feeder and one keeper serve both splitters (a stale record cannot name an orphan feeder).
+            _checkCode(c.records, "IDMRecords");
+            (address royalty,) = IRoyaltyView(c.records).royaltyInfo(1, 10_000);
+            _checkCode(royalty, "RevenueSplitter");
+            (address[] memory rp,,) = RevenueSplitter(payable(royalty)).payees();
+            require(
+                rp.length == 3 && rp[0] == c.holders && rp[1] == c.treasuryFeeder,
+                "TREASURY_FEEDER: the IDM Records royalty splitter does not pay this RewardFeeder and TreasuryFeeder"
+            );
             _distinctPayees([c.holders, c.treasuryFeeder, c.imdBurn, c.infra]);
         }
     }

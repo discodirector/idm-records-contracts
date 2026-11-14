@@ -16,7 +16,8 @@ interface IWETH9 {
 ///
 ///         One contract, two deployments (owner decision 2026-11-03, docs/X402-MUSIC.md):
 ///         - Robinhood Chain, the NFT royalty receiver: 50% RewardFeeder (→ USDG → IDM Records reward pot),
-///           25% PulseTreasury (its ETH can only buy IDM, and its IDM can only be burned), 25% infra.
+///           25% TreasuryFeeder (ETH, and USDG swapped to ETH, on to PulseTreasury: its ETH can only buy IDM,
+///           and its IDM can only be burned), 25% infra.
 ///         - Base, the x402 LabelSplitter: 50% HolderRewards (holders paid in USDC on Base), 25% the burn wallet (the
 ///           bridge keeper moves it to Robinhood as ETH for PulseTreasury), 25% infra.
 ///         - Stations income, one per payment chain: four payees at 25% each (holders, $IDM burn, IMD burn, infra);

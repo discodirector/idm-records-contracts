@@ -764,9 +764,11 @@ contract DeployStationsSplitTest is LabelDeployFixture {
     function _robinhood() internal returns (DeployStationsSplit.Config memory c, RewardFeeder feeder) {
         mockRobinhood();
         vm.etch(USDG, address(new Usdc6()).code);
+        // As DeployRecords: the records' royalty receiver is the splitter paying these two feeders.
+        uint64 n = vm.getNonce(address(this));
         IDMRecords records = new IDMRecords(
             "IDM Records", "RECORDS", deployer, signer, IERC20Like(USDG), IBalanceOf(IDM), "https://theidm.fun/records/",
-            address(0), 0
+            vm.computeCreateAddress(address(this), n + 3), 500
         );
         feeder = new RewardFeeder(
             IPoolManager(POOL_MANAGER), IRecordsPot(address(records)), deployer, keeper, infra, 500, 10, 1500e6
@@ -774,6 +776,12 @@ contract DeployStationsSplitTest is LabelDeployFixture {
         // ~2249 USDG per ETH in the mocked pool: ceiling 2800 is inside the 0-50% band.
         TreasuryFeeder t =
             new TreasuryFeeder(IPoolManager(POOL_MANAGER), USDG, TREASURY, deployer, keeper, infra, 500, 10, 2800e6);
+        address[] memory ra = new address[](3);
+        (ra[0], ra[1], ra[2]) = (address(feeder), address(t), infra);
+        uint16[] memory rb = new uint16[](3);
+        (rb[0], rb[1], rb[2]) = (5000, 2500, 2500);
+        RevenueSplitter royalty = new RevenueSplitter(ra, rb, new bool[](3), address(0), infra);
+        assertEq(address(royalty), vm.computeCreateAddress(address(this), n + 3));
         c = DeployStationsSplit.Config(
             deployer, address(feeder), address(0), imdBurn, infra, address(feeder), address(0), address(records),
             deployer, keeper, address(t), address(t)
@@ -820,6 +828,13 @@ contract DeployStationsSplitTest is LabelDeployFixture {
     function test_RobinhoodInputChecks() public {
         (DeployStationsSplit.Config memory c, RewardFeeder feeder) = _robinhood();
         DeployStationsSplit.Config memory w = _copy(c);
+        // A stale record naming another TreasuryFeeder, identical but not the royalty splitter's payee.
+        w.treasuryFeeder = w.recordTreasuryFeeder = address(
+            new TreasuryFeeder(IPoolManager(POOL_MANAGER), USDG, TREASURY, deployer, keeper, infra, 500, 10, 2800e6)
+        );
+        vm.expectRevert(bytes("TREASURY_FEEDER: the IDM Records royalty splitter does not pay this RewardFeeder and TreasuryFeeder"));
+        script.checkInputs(w);
+        w = _copy(c);
         w.recordHolders = address(0);
         vm.expectRevert(bytes("PAYOUT_FEEDER: no verified record of it (run DeployRecords verify() first)"));
         script.checkInputs(w);

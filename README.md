@@ -15,10 +15,10 @@ Nothing here is deployed yet. This repository is published for review before the
 | `src/TreasuryFeeder.sol` | 109 | Robinhood | Keeper-only: swaps USDG (up to `maxUsdgIn` per call) to ETH in the same pool and sends all ETH held to the $IDM treasury. Owner-set price ceiling `maxUsdgPerEth`. The $IDM payee of both Robinhood splitters. |
 | `src/EthPoolSwap.sol` | 94 | Robinhood | Shared exact-input swap against the v4 PoolManager (`unlock` callback) used by both feeders. |
 | `src/KeeperOwned.sol` | 59 | Robinhood | Owner / keeper roles of the feeders. |
-| `src/RevenueSplitter.sol` | 144 | Robinhood, Base | Ownerless push splitter for ETH and ERC-20 with fixed payees and shares; optional WETH unwrap; ETH-only payee whose tokens go to a sink. |
+| `src/RevenueSplitter.sol` | 145 | Robinhood, Base | Ownerless push splitter for ETH and ERC-20 with fixed payees and shares; optional WETH unwrap; ETH-only payee whose tokens go to a sink. |
 | `src/HolderRewards.sol` | 336 | Base 8453 | USDC rewards for record holders, paid against keeper-posted Merkle roots with a delay, guardian revoke, pushed (plain accounts only) or pulled claims. |
 | `src/ArcForwarder.sol` | 136 | Arc 5042 | Ownerless: sends all its USDC to a fixed recipient on Base with Circle CCTP v2. |
-| `script/*.s.sol` | 1496 | | Deploy scripts with dry run, on-chain checks (`verify()`), pinned code hashes and price band checks. In scope as far as they set security-relevant parameters. |
+| `script/*.s.sol` | 1510 | | Deploy scripts with dry run, on-chain checks (`verify()`), pinned code hashes and price band checks. In scope as far as they set security-relevant parameters. |
 
 Out of scope: `lib/` (vendored upstream code, see `DEPENDENCIES.md`), the $IDM token and its hook (already live),
 the off-chain services (voucher signer, payout keeper, rewards keeper). Comments that point to `docs/...` or `bot/...`
@@ -103,6 +103,15 @@ https://api.imd.fun/jobs/88d4aa11-292b-4c18-95c5-dc9f3083f63b/report.md) confirm
 
 Documented instead of changed (trust model above, known risks below): the absolute band, the keeper's feed timing,
 the seller's claim window on Base.
+
+## Hardened after a self re-check (2026-11-14)
+
+- `DeployStationsSplit` on Robinhood reads the IDM Records royalty receiver on chain and requires it to be a
+  `RevenueSplitter` paying this RewardFeeder and TreasuryFeeder, so a stale deployment record cannot point the Stations
+  splitter at an orphan TreasuryFeeder (`test_RobinhoodInputChecks`).
+- A deployment record of an earlier step is accepted only if its `chainId` is the chain being deployed to.
+- Off-chain (main repo): the payout keeper runs each action on its own and, when a swap reverts, sends the same call
+  again without the swap (`feed(0, 0)` / `swap(0, 0)`), so pooling and the ETH send never wait on a swap.
 
 ## Known and accepted
 
